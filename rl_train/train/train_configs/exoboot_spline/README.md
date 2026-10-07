@@ -210,6 +210,15 @@ on `Tutorial_L1`, from the repo's history at `e677989`), which walks on `DephyEx
 On the true stride the delivered peak lands at phase 0.545–0.557 against the spline's 0.543, ± 0.04–0.07: the boot's
 estimator predicts phase from the last two strides, and assisted strides vary in length.
 
+To see it, `tools/render_controller_video.py` renders one of those episodes: the model, each boot tinted red by its
+torque, and underneath each ankle's torque, the controller's gait phase estimate, its control state and foot force,
+with per leg the two strides the phase is averaged over, their mean, and the current stride's progress against it.
+Pick a start index from the rollout report:
+
+```bash
+python tools/render_controller_video.py <train_session_...>/trained_models/<model>.zip --start 1280 --seconds 20
+```
+
 With 4PTS's 25 N·m, which the policy was never trained with, it falls after 6–20 s (and drifts off the reference
 motion, the imitation env's 0.6 rad termination, after 5–14 s), at 1.08–1.20 m/s, with peak plantarflexion of 23–25°
 against 18–21° unassisted. Unassisted it walks the full 33 s from all 10 start points, with or without that
