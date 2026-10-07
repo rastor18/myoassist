@@ -404,22 +404,25 @@ class MyoAssistLegBase(env_base.MujocoEnv):
         target_velocity_period = random.uniform(
             self._min_target_velocity_period, self._max_target_velocity_period
         )  # maximum acc/dec is self._target_velocity_period / 2
-        self.set_target_velocity_mode_manually(
-            velocity_mode_for_this_episode,
-            self._min_target_velocity,
-            self._min_target_velocity,
-            self._max_target_velocity,
-            starting_phase,
-            target_velocity_period,
-        )
-        if self._velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.UNIFORM:
-            self._target_velocity = random.uniform(self._min_target_velocity, self._max_target_velocity)
-        elif self._velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.SINUSOIDAL:
-            self._target_velocity = self._calc_sinusoidal_target_velocity(
-                self._starting_phase, self._target_velocity_period, self._min_target_velocity, self._max_target_velocity
+        if velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.UNIFORM:
+            initial_target_velocity = random.uniform(self._min_target_velocity, self._max_target_velocity)
+        elif velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.SINUSOIDAL:
+            initial_target_velocity = self._calc_sinusoidal_target_velocity(
+                starting_phase, target_velocity_period, self._min_target_velocity, self._max_target_velocity
             )
-        elif self._velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.STEP:
-            self._target_velocity = np.random.uniform(self._min_target_velocity, self._max_target_velocity)
+        elif velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.STEP:
+            initial_target_velocity = np.random.uniform(self._min_target_velocity, self._max_target_velocity)
+        # Keyword arguments: from 4a4cbe3 these were positional and out of order, which put the random
+        # phase in max_target_velocity. The setter stores min/max, so the band drifted to two random
+        # numbers in [0, 2*pi] m/s by the first reset. Passing our own band back keeps it the config's.
+        self.set_target_velocity_mode_manually(
+            mode=velocity_mode_for_this_episode,
+            starting_phase=starting_phase,
+            initial_target_velocity=initial_target_velocity,
+            min_target_velocity=self._min_target_velocity,
+            max_target_velocity=self._max_target_velocity,
+            target_velocity_period=target_velocity_period,
+        )
 
     def _calc_sinusoidal_target_velocity(self, phase: float, period: float, min_velocity: float, max_velocity: float):
         return (
