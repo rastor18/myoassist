@@ -78,9 +78,17 @@ def main():
     from rl_train.analyzer.gait_evaluate import GaitData, ImitationGaitEvaluator
     from myoassist_utils.eval_utils import build_composite, CompositeInputs, CMAPS
 
+    from rl_train.envs.environment_handler import EnvironmentHandler
+
     with open(os.path.join(log_dir, "session_config.json"), "r") as f:
         config_dict = json.load(f)
-    config = DictionableDataclass.create(ImitationTrainSessionConfig, config_dict)
+    # Load with the session's own config class, as training did. The exo envs' class carries the scripted exo
+    # controller's fields; read as the base imitation class those are silently dropped, and the evaluation
+    # rollout runs without the controller the policy was trained under.
+    config_type = EnvironmentHandler.get_config_type_from_session_id(config_dict["env_params"]["env_id"])
+    if not issubclass(config_type, ImitationTrainSessionConfig):
+        config_type = ImitationTrainSessionConfig  # this evaluator is imitation-only; keep what it always loaded
+    config = DictionableDataclass.create(config_type, config_dict)
 
     if args.varying:
         base = dict(config.evaluate_param_list[0]) if config.evaluate_param_list else {}

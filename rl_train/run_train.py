@@ -96,7 +96,8 @@ def ppo_train_with_parameters(config, train_time_step, is_rendering_on, train_lo
     print("learning done!")
 
 
-if __name__ == "__main__":
+def parse_args_and_config(argv=None):
+    """Parse the command line into (args, config). ``argv`` defaults to sys.argv[1:]; tests pass their own."""
     import argparse
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -112,20 +113,29 @@ if __name__ == "__main__":
         help="realtime evaluate(True/False)",
     )
 
-    args, unknown_args = parser.parse_known_args()
+    args, unknown_args = parser.parse_known_args(argv)
     if args.config_file_path is None:
         raise ValueError("config_file_path is required")
 
-    default_config = EnvironmentHandler.get_session_config_from_path(
+    # Resolve the config class from env_id before generating the --config.* flags. Generating them from the base
+    # class left every field that only a subclass defines -- out_of_trajectory_threshold, the exo controller
+    # params -- rejected as an unrecognized argument.
+    env_id = EnvironmentHandler.get_session_config_from_path(
         args.config_file_path, myoassist_config.TrainSessionConfigBase
-    )
+    ).env_params.env_id
+    config_type = EnvironmentHandler.get_config_type_from_session_id(env_id)
+    default_config = EnvironmentHandler.get_session_config_from_path(args.config_file_path, config_type)
     DictionableDataclass.add_arguments(default_config, parser, prefix="config.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    config_type = EnvironmentHandler.get_config_type_from_session_id(default_config.env_params.env_id)
     config = EnvironmentHandler.get_session_config_from_path(args.config_file_path, config_type)
 
     DictionableDataclass.set_from_args(config, args, prefix="config.")
+    return args, config
+
+
+if __name__ == "__main__":
+    args, config = parse_args_and_config()
 
     # Second-resolution timestamps collide when runs are launched together, and `exist_ok=True`
     # then silently hands two trainings the same directory: they interleave writes to

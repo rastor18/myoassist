@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 from rl_train.utils.data_types import DictionableDataclass
 from rl_train.analyzer.train_log_analyzer import TrainLogAnalyzer
-from rl_train.train.train_configs.config import TrainSessionConfigBase
 from rl_train.train.train_configs.config_imitation import ImitationTrainSessionConfig
 
 
@@ -29,16 +28,14 @@ class TrainAnalyzer:
     def analyze_in_sequence(self, log_dir: str, show_plot: bool):
         with open(os.path.join(log_dir, "session_config.json"), "r") as f:
             config_dict = json.load(f)
-            config = DictionableDataclass.create(TrainSessionConfigBase, config_dict)
+            # The session's own config class, as training used. The exo envs' class carries the scripted exo
+            # controller's fields; read as the base imitation class those are silently dropped, and the
+            # evaluation rollout runs without the controller the policy is training under.
+            from rl_train.envs.environment_handler import EnvironmentHandler
 
-            if config.env_params.env_id == "myoAssistLeg-v0":
-                config = DictionableDataclass.create(TrainSessionConfigBase, config_dict)
-            elif config.env_params.env_id in ["myoAssistLegImitation-v0", "myoAssistLegImitationExo-v0"]:
-                # print("Imitation train session config")
-                config = DictionableDataclass.create(ImitationTrainSessionConfig, config_dict)
-                # print("\nAll fields in RewardWeights:")
-                # for field in fields(config.env_params.reward_keys_and_weights):
-                #     print(f"{field.name}: {getattr(config.env_params.reward_keys_and_weights, field.name)}")
+            config = DictionableDataclass.create(
+                EnvironmentHandler.get_config_type_from_session_id(config_dict["env_params"]["env_id"]), config_dict
+            )
 
         for eval_idx, evaluate_param in enumerate(config.evaluate_param_list):
             log_handler = TrainLogHandler(log_dir)
@@ -106,7 +103,7 @@ class TrainAnalyzer:
             gait_data.read_json_data(gait_data_path)
 
             # Only load reference data and perform analysis for imitation learning environments
-            if config.env_params.env_id in ["myoAssistLegImitation-v0", "myoAssistLegImitationExo-v0"]:
+            if isinstance(config, ImitationTrainSessionConfig):
                 # Resolved from this file, not the cwd: the path used to be the bare
                 # "reference_data/segmented.npz", which only resolves when the process
                 # runs from inside rl_train/. Started from the repo root -- how every
