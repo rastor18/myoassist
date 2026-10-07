@@ -10,7 +10,7 @@ from rl_train.train.train_configs.config import TrainSessionConfigBase
 # Every other env id selects the muscle-only HumanActorCriticPolicy. Single source of truth
 # for both the policy switch in get_stable_baselines3_model and the guard below, which is
 # only correct as long as the two agree.
-_EXO_ENV_IDS = ("myoAssistLegImitationExo-v0",)
+_EXO_ENV_IDS = ("myoAssistLegImitationExo-v0", "myoAssistLegImitationExoDevice-v0")
 
 
 class EnvironmentHandler:
@@ -217,7 +217,7 @@ class EnvironmentHandler:
             return TrainSessionConfigBase
         elif session_id in ["myoAssistLegImitation-v0"]:
             return ImitationTrainSessionConfig
-        elif session_id == "myoAssistLegImitationExo-v0":
+        elif session_id in _EXO_ENV_IDS:
             return ExoImitationTrainSessionConfig
         raise ValueError(f"Invalid session id: {session_id}")
 

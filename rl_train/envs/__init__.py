@@ -46,6 +46,13 @@ register_env_myoassist(
     max_episode_steps=1000,
     kwargs={},
 )
+# The exo env with a device controller inside the physics loop (env_params.device_controller); see device_control.py.
+register_env_myoassist(
+    id="myoAssistLegImitationExoDevice-v0",
+    entry_point="rl_train.envs.myoassist_leg_imitation_exo:MyoAssistLegImitationExoDevice",
+    max_episode_steps=1000,
+    kwargs={},
+)
 # register_env_myoassist(id='myoLeg18RewardPerStep-v0',
 #         entry_point='rl_train.envs.myo_leg_18_reward_per_step:myoLeg18RewardPerStep',
 #         max_episode_steps=1000,
