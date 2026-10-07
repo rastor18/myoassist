@@ -224,14 +224,20 @@ motion, the imitation env's 0.6 rad termination, after 5–14 s), at 1.08–1.20
 against 18–21° unassisted. Unassisted it walks the full 33 s from all 10 start points, with or without that
 termination. A policy trained with 4PTS should do better, but that has not been tested.
 
-The tool runs in evaluate mode at the config's target speed, as the repo's own evaluation does, and starts every
-joint from the keyframe: `MyoAssistLegImitation.reset` poses only the reference's joints and leaves the toes, knee
-translations and muscle via points where the previous episode ended, which also affects training.
+The tool runs in evaluate mode at the config's target speed, as the repo's own evaluation does.
 
-This branch also fixes the target speed in training. From `4a4cbe3` (2025-08-05) until then,
-`MyoAssistLegBase._change_mode_and_target_velocity_randomly` passed `set_target_velocity_mode_manually` its arguments
-out of order, so after the first reset a training episode's target speed lay anywhere between two random numbers in
-[0, 2π] m/s, whatever the config said. Policies trained on earlier code were trained against random target speeds.
+This branch also fixes two things in how MyoAssist starts episodes, in training and evaluation alike. Policies
+trained on earlier code were trained under both, so compare runs only on the same code version.
+
+* **The target speed in training.** From `4a4cbe3` (2025-08-05), `MyoAssistLegBase._change_mode_and_target_velocity_randomly`
+  passed `set_target_velocity_mode_manually` its arguments out of order. After the first reset a training episode's
+  target speed lay anywhere between two random numbers in [0, 2π] m/s, whatever the config said, and every reference
+  velocity was scaled by it.
+* **The start pose.** `MyoAssistLegImitation.reset` posed only the reference's joints. The toes, and the knee
+  translations and muscle via points that constraints tie to the knee and hip angles, kept the state the previous
+  episode ended with, so each episode started with those constraints violated by up to about 6 cm. Now every joint
+  starts from the keyframe, the reference's joints take the reference pose, and the tied joints sit on their
+  constraints (`tools/tests/test_imitation_reset.py`).
 
 ## Known limits
 

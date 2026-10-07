@@ -1,4 +1,5 @@
 import collections
+import mujoco
 import numpy as np
 from rl_train.envs.myoassist_leg_base import MyoAssistLegBase
 from rl_train.train.train_configs.config import TrainSessionConfigBase
@@ -368,10 +369,51 @@ class MyoAssistLegImitation(MyoAssistLegBase):
         # generate random targets
         # new_qpos = self.generate_qpos()# TODO: should set qvel too.
         # self.sim.data.qpos = new_qpos
-        self._follow_reference_motion(False)
+        self._pose_at_imitation_index()
 
         obs = super().reset(reset_qpos=self.sim.data.qpos, reset_qvel=self.sim.data.qvel, **kwargs)
         return obs
+
+    def _pose_at_imitation_index(self):
+        """Set every joint's position and velocity for an episode starting at `_imitation_index`.
+
+        The reference covers only its own joints (`reference_data_keys`). Every other joint used to
+        keep the state the previous episode ended with: the toes, and the knee translations and
+        muscle via points that joint equalities tie to the knee and hip angles. So no two resets to
+        the same index started alike (measured on myolegs22: the toe angle spread over 0.75 rad and
+        9 rad/s), and every episode started with those constraints violated, by up to about 6 cm and
+        0.5 m/s, for the solver to snap back during the first step. Now every joint starts from the
+        keyframe, the reference's joints take the reference pose, and the tied joints go where
+        their constraints put them.
+        """
+        self.sim.data.qpos[:] = self.init_qpos
+        self.sim.data.qvel[:] = self.init_qvel
+        self._follow_reference_motion(False)
+        self._pose_tied_joints()
+
+    def _pose_tied_joints(self):
+        """Put every joint that a joint equality ties to another where the constraint says, in position and velocity.
+
+        A joint equality holds the dependent joint y to a quartic in the independent joint x,
+        `y - y0 = a0 + a1 (x - x0) + ... + a4 (x - x0)^4`, with x0, y0 the joints' `qpos0` and the
+        coefficients in `eq_data[:5]`; its velocity follows by the chain rule. With no independent
+        joint, y is held at y0 + a0.
+        """
+        model, data = self.sim.model, self.sim.data
+        for e in range(model.neq):
+            if model.eq_type[e] != mujoco.mjtEq.mjEQ_JOINT or not model.eq_active0[e]:
+                continue
+            a = model.eq_data[e, :5]
+            dependent, independent = int(model.eq_obj1id[e]), int(model.eq_obj2id[e])
+            qadr, dadr = model.jnt_qposadr[dependent], model.jnt_dofadr[dependent]
+            if independent < 0:
+                data.qpos[qadr], data.qvel[dadr] = model.qpos0[qadr] + a[0], 0.0
+                continue
+            x_qadr = model.jnt_qposadr[independent]
+            x = data.qpos[x_qadr] - model.qpos0[x_qadr]
+            data.qpos[qadr] = model.qpos0[qadr] + a[0] + a[1] * x + a[2] * x**2 + a[3] * x**3 + a[4] * x**4
+            dydx = a[1] + 2 * a[2] * x + 3 * a[3] * x**2 + 4 * a[4] * x**3
+            data.qvel[dadr] = dydx * data.qvel[model.jnt_dofadr[independent]]
 
     # override
     def _initialize_pose(self):

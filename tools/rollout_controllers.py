@@ -20,10 +20,9 @@ controller's strike, phase, phase-valid and stance flags. The same 4PTS is also 
   gait      episode length, ending, speed and ankle angle against exo off. Reported, not required: the policy was not
             trained with this assistance.
 
-Episodes run in evaluate mode at the config's target speed, and start at chosen indices of the reference motion from a
-whole pose (``reset_at``): the env's own reset draws the index from an unseeded generator and carries part of the last
-episode's state over. Physics and the deterministic policy are otherwise fixed, so each episode is reproducible from
-its index. Every ``--index-step``-th start index is tried
+Episodes run in evaluate mode at the config's target speed, and start at chosen indices of the reference motion
+(``reset_at``): the env's own reset draws the index from an unseeded generator. Physics and the deterministic policy
+are otherwise fixed, so each episode is reproducible from its index. Every ``--index-step``-th start index is tried
 with the exo off, and the longest that walk for at least ``--min-seconds`` (up to ``--max-kept``) are run in all three
 cases.
 
@@ -169,46 +168,13 @@ class Episode:
         return len(self.steps["t"]) * self.dt
 
 
-def pose_tied_joints(model, data) -> None:
-    """Put every joint that a joint equality ties to another where the constraint says, in position and velocity.
-
-    On the MyoAssist legs these are the knee translations and the muscle via points, each a polynomial in a knee or
-    hip angle: ``y - y0 = a0 + a1 (x - x0) + ... + a4 (x - x0)^4``, with ``x0``, ``y0`` the joints' ``qpos0``.
-    """
-    import mujoco
-
-    for e in range(model.neq):
-        if model.eq_type[e] != mujoco.mjtEq.mjEQ_JOINT or not model.eq_active0[e]:
-            continue
-        a = model.eq_data[e, :5]
-        dependent, independent = int(model.eq_obj1id[e]), int(model.eq_obj2id[e])
-        qadr, dadr = model.jnt_qposadr[dependent], model.jnt_dofadr[dependent]
-        if independent < 0:
-            data.qpos[qadr], data.qvel[dadr] = model.qpos0[qadr] + a[0], 0.0
-            continue
-        x = data.qpos[model.jnt_qposadr[independent]] - model.qpos0[model.jnt_qposadr[independent]]
-        data.qpos[qadr] = model.qpos0[qadr] + a[0] + a[1] * x + a[2] * x**2 + a[3] * x**3 + a[4] * x**4
-        data.qvel[dadr] = (a[1] + 2 * a[2] * x + 3 * a[3] * x**2 + 4 * a[4] * x**3) * data.qvel[model.jnt_dofadr[independent]]
-
-
 def reset_at(env, index: int):
-    """``MyoAssistLegImitation.reset``, from reference index ``index`` instead of a random one, and from a whole pose.
-
-    The env's own reset poses only the reference's joints. Every other joint keeps the position and velocity the last
-    episode ended with: the toes, and the joints constraints tie to the knees and hips (knee translations, muscle via
-    points), which then start out violating those constraints. So no two resets to the same index start alike. Here
-    every joint starts from the model's keyframe, then takes the reference pose, and the tied joints are put where
-    their constraints say.
-    """
+    """``MyoAssistLegImitation.reset``, from reference index ``index`` instead of one drawn at random."""
     from rl_train.envs.myoassist_leg_imitation import MyoAssistLegImitation
 
-    data = env.sim.data
-    data.qpos[:] = env.init_qpos
-    data.qvel[:] = env.init_qvel
     env._imitation_index = int(index)
-    env._follow_reference_motion(False)
-    pose_tied_joints(getattr(env.sim.model, "ptr", env.sim.model), data)
-    return super(MyoAssistLegImitation, env).reset(reset_qpos=data.qpos, reset_qvel=data.qvel)
+    env._pose_at_imitation_index()
+    return super(MyoAssistLegImitation, env).reset(reset_qpos=env.sim.data.qpos, reset_qvel=env.sim.data.qvel)
 
 
 def run_episode(env, policy, recorder: Recorder, index: int, *, case: str, max_steps: int, safe_height: float) -> Episode:
