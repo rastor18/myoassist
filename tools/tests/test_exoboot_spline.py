@@ -296,6 +296,24 @@ def test_the_contact_debounce_moves_nothing_but_the_tick_that_reports_the_strike
     assert np.all(debounced[~settled] == 0.0) and np.all(at_once[~settled] == 0.0), "reel-in covers the debounce"
 
 
+def test_diagnostics_date_each_reported_strike_and_only_on_its_tick():
+    """``strike_time`` is the detector's dating of the strike the tick reports (the contact's onset), and -1 on every
+    other tick, so a record of the diagnostics alone says when each strike happened."""
+    controller = ExoBootFourPointSplineController(
+        spline=FourPointSpline(**EXOBOOT),
+        heel_strike_detector=VgrfHeelStrikeDetector(grf_on=100.0, grf_off=25.0, min_unload_time=0.05, min_contact_time=0.05),
+        phase_estimator=StrideAverageGaitPhaseEstimator(),
+    )
+    ts = np.arange(0.0, 2.0, 1 / RATE_HZ)
+    rows = []
+    for t in ts:
+        controller.step(float(t), 0.0 if t < 1.0 else 400.0)
+        rows.append(controller.diagnostics())
+    reported = [d for d in rows if d["heel_strike"] == 1.0]
+    assert len(reported) == 1 and reported[0]["strike_time"] == ts[np.searchsorted(ts, 1.0)]
+    assert all(d["strike_time"] == -1.0 for d in rows if d["heel_strike"] == 0.0)
+
+
 def test_a_scuff_does_not_cost_the_phase():
     """The regression: on a gait that scuffs in every swing, phase stays valid once two strides are in."""
     controller = ExoBootFourPointSplineController(
@@ -489,7 +507,7 @@ def test_diagnostics_stay_finite_through_warmup():
 def test_control_state_is_the_boots():
     """Swing until a phase exists -- the boot only enters reel-in at a heel strike once it has one -- then each stride
     reel-in, stance and, from toe-off to the next strike, swing; with the stride estimate the mean of the last two."""
-    from myoassist_utils.exo_ctrl.fourpoint_spline import REEL_IN_STATE, STANCE_STATE, SWING_STATE
+    from myoassist_utils.exo_ctrl.boot_state import REEL_IN, STANCE, SWING
 
     controller = _controller(reel_in_time=0.15)
     strides = np.array([1.0, 1.2, 1.1, 1.1, 1.1, 1.1, 1.1])
@@ -501,13 +519,13 @@ def test_control_state_is_the_boots():
         states.append(controller.diagnostics()["control_state"])
         estimates.append(controller.diagnostics()["stride_estimate"])
     states, estimates = np.array(states), np.array(estimates)
-    assert np.all(states[ticks < strikes[2]] == SWING_STATE), "warm-up, no phase yet: swing"
+    assert np.all(states[ticks < strikes[2]] == SWING), "warm-up, no phase yet: swing"
     k = np.searchsorted(strikes, ticks, side="right") - 1
     since = ticks - strikes[np.maximum(k, 0)]
     steady = ticks > strikes[2] + 1 / RATE_HZ
-    assert np.all(states[steady & (since < 0.149)] == REEL_IN_STATE)
-    assert np.all(states[steady & (since > 0.151) & (since < 0.6 * 1.1 - 0.01)] == STANCE_STATE)
-    assert np.all(states[steady & (since > 0.6 * 1.2 + 0.01)] == SWING_STATE)
+    assert np.all(states[steady & (since < 0.149)] == REEL_IN)
+    assert np.all(states[steady & (since > 0.151) & (since < 0.6 * 1.1 - 0.01)] == STANCE)
+    assert np.all(states[steady & (since > 0.6 * 1.2 + 0.01)] == SWING)
     # Right after the third strike the estimate is the mean of the first two whole strides, 1.0 and 1.2 s.
     after_third = (ticks > strikes[2] + 1 / RATE_HZ) & (ticks < strikes[3])
     np.testing.assert_allclose(estimates[after_third], 1.1, atol=1 / RATE_HZ)

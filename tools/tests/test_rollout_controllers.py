@@ -142,6 +142,79 @@ def test_the_expected_profile_is_the_gated_spline():
 
 
 @pytest.fixture(scope="module")
+def model():
+    import mujoco
+
+    from myoassist_utils.compose import compose_env_model
+
+    return mujoco.MjModel.from_xml_string(compose_env_model("myolegs22", "DephyExoBoot_L1", terrain=None))
+
+
+def _record(model, legs, extra_keys=(), strikes=(0.0, 1.0, 0.0)):
+    """Three substeps through a ``Recorder`` around a stand-in controller whose legs report ``legs(strike)``."""
+    import mujoco
+
+    from tools.rollout_controllers import Recorder
+
+    strike = [0.0]
+    inner = types.SimpleNamespace(
+        actuator_ids=(model.actuator("Exo_R").id, model.actuator("Exo_L").id),
+        legs=[types.SimpleNamespace(controller=types.SimpleNamespace(diagnostics=d)) for d in legs(strike)],
+        reset=lambda: None,
+        compute_torque=lambda sim: (0.0, 0.0),
+    )
+    recorder = Recorder(inner, model, extra_keys)
+    data = mujoco.MjData(model)
+    for k, s in enumerate(strikes):
+        strike[0], data.time = s, 0.01 * k
+        recorder.compute_torque(types.SimpleNamespace(data=data))
+    return recorder, recorder.take()
+
+
+def test_the_recorder_reads_any_controllers_diagnostics_by_key(model):
+    """A key the controller does not report is NaN; a strike with no time of its own is dated to the row reporting it;
+    extra keys are recorded after the fields every record has."""
+    from tools.rollout_controllers import Recorder
+
+    def legs(strike):
+        return [lambda v=v: {"heel_strike": strike[0], "phase": 0.25, "speed": v} for v in (1.1, 1.2)]
+
+    recorder, record = _record(model, legs, extra_keys=("speed",))
+    assert recorder.fields == (*Recorder.FIELDS, "speed_r", "speed_l") and set(record) == set(recorder.fields)
+    np.testing.assert_array_equal(record["phase_r"], 0.25)
+    assert np.all(np.isnan(record["control_state_l"])) and np.all(np.isnan(record["stride_estimate_r"]))
+    np.testing.assert_array_equal(record["strike_time_r"], [np.nan, 0.01, np.nan])
+    np.testing.assert_array_equal(record["speed_r"], 1.1)
+    np.testing.assert_array_equal(record["speed_l"], 1.2)
+
+
+def test_the_recorder_takes_a_controllers_own_strike_time(model):
+    def legs(strike):
+        return [lambda: {"heel_strike": strike[0], "strike_time": 0.004 if strike[0] else -1.0}] * 2
+
+    _, record = _record(model, legs)
+    np.testing.assert_array_equal(record["strike_time_l"], [np.nan, 0.004, np.nan])
+
+
+def test_with_no_controller_legs_every_diagnostic_is_nan(model):
+    _, record = _record(model, lambda strike: [], extra_keys=("speed",))
+    for key in ("strike_r", "phase_l", "control_state_r", "speed_l"):
+        assert np.all(np.isnan(record[key])), key
+    assert np.all(np.isfinite(record["grf_r"]))
+
+
+def test_every_case_belongs_to_one_suite_after_the_shared_exo_off_case():
+    from tools.rollout_controllers import CASES, EXO_OFF, SUITES, suite_of
+
+    assert next(iter(CASES)) == EXO_OFF and suite_of(EXO_OFF) is None
+    names = [case for suite in SUITES.values() for case in suite.cases]
+    assert len(names) == len(set(names)) and EXO_OFF not in names, "a case name means one thing"
+    for suite in SUITES.values():
+        assert (REPO_ROOT / suite.config).is_file()
+        assert all(suite_of(case) is suite and CASES[case] is suite.cases[case] for case in suite.cases)
+
+
+@pytest.fixture(scope="module")
 def env():
     from tools.rollout_controllers import CASES, DEFAULT_CONFIG, make_env
 

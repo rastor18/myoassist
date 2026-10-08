@@ -23,6 +23,7 @@ import math
 from scipy.interpolate import PchipInterpolator
 
 from myoassist_utils.exo_ctrl.base import HeelStrikeDetector
+from myoassist_utils.exo_ctrl.boot_state import REEL_IN, STANCE, SWING
 from myoassist_utils.exo_ctrl.phase import StrideAverageGaitPhaseEstimator
 
 
@@ -106,11 +107,6 @@ class FourPointSpline:
         return float(self._spline(min(1.0, max(0.0, phase))))
 
 
-# The boot's control states (NeuMoveExoBoot constants.ControlState) this port reproduces. The boot's reel-out (1), which
-# lets its cable out after toe-off, applies no assist either; with no cable here it is reported as swing.
-SWING_STATE, REEL_IN_STATE, STANCE_STATE = 2, 3, 4
-
-
 class ExoBootFourPointSplineController:
     """One leg's controller: heel strikes -> gait phase -> spline torque, in the ExoBoot's order.
 
@@ -135,9 +131,10 @@ class ExoBootFourPointSplineController:
     commands no spline torque during reel-in and delivers ~0.8 N*m of cable tension; applying the bias there
     instead adds 7-8% to its impulse.
 
-    ``diagnostics()`` reports the state the boot would log as ``control_state``: swing (2) until a gait phase exists
-    -- the boot only enters reel-in at a heel strike once it has one -- then reel-in (3), stance (4), and swing (2)
-    again from toe-off to the next strike.
+    ``diagnostics()`` reports the state the boot would log as ``control_state`` (``boot_state``'s numbering): swing (2)
+    until a gait phase exists -- the boot only enters reel-in at a heel strike once it has one -- then reel-in (3),
+    stance (4), and swing (2) again from toe-off to the next strike. The boot's reel-out (1), which lets its cable out
+    after toe-off, applies no assist either; with no cable here it is reported as swing.
 
     The env steps it at a fixed rate inside the physics loop (``device.FixedRateLegExos``), as the boot's own loop
     does, and holds its torque between ticks. Timing is all in sim time and gait phase, so the rate only sets how
@@ -175,7 +172,7 @@ class ExoBootFourPointSplineController:
         self._did_heel_strike = False
         self._phase: float | None = None
         self._in_stance = False
-        self._control_state = SWING_STATE
+        self._control_state = SWING
         self._torque = 0.0
 
     def step(self, t: float, signal: float) -> float:
@@ -191,7 +188,7 @@ class ExoBootFourPointSplineController:
         phase = self._phase
         if phase is None:
             self._in_stance = False
-            self._control_state = SWING_STATE
+            self._control_state = SWING
         else:
             # A phase is only returned once a mean stride duration exists. Reel-in is a time, so it becomes a phase
             # through the same stride average the phase itself is divided by. Toe-off is strictly greater, as
@@ -199,24 +196,26 @@ class ExoBootFourPointSplineController:
             stride = self.phase_estimator.mean_stride_duration
             self._in_stance = self.reel_in_time / stride <= phase <= self.toe_off_fraction
             if self._in_stance:
-                self._control_state = STANCE_STATE
+                self._control_state = STANCE
             elif phase <= self.toe_off_fraction:
-                self._control_state = REEL_IN_STATE
+                self._control_state = REEL_IN
             else:
-                self._control_state = SWING_STATE
+                self._control_state = SWING
         self._torque = self.spline.torque(phase) if self._in_stance else 0.0
         return self._torque
 
     def diagnostics(self) -> dict[str, float]:
         # Phase is reported as -1 when invalid rather than NaN: these values can be summed into training logs,
-        # and -1 is outside [0, 1] so it cannot be mistaken for a real phase. The stride estimate (s) is the mean of
-        # the last strides the phase is divided by, -1 before there is one.
+        # and -1 is outside [0, 1] so it cannot be mistaken for a real phase. The strike time (s) is when the strike this
+        # tick reports happened, which a debounced detector dates back to the contact's onset; -1 on a tick reporting
+        # none. The stride estimate (s) is the mean of the last strides the phase is divided by, -1 before there is one.
         return {
             "torque_nm": self._torque,
             "phase": -1.0 if self._phase is None else self._phase,
             "phase_valid": 0.0 if self._phase is None else 1.0,
             "in_stance": 1.0 if self._in_stance else 0.0,
             "heel_strike": 1.0 if self._did_heel_strike else 0.0,
+            "strike_time": self.heel_strike_detector.strike_time if self._did_heel_strike else -1.0,
             "control_state": float(self._control_state),
             "stride_estimate": -1.0
             if self.phase_estimator.mean_stride_duration is None

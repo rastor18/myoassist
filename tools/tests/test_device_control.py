@@ -153,6 +153,44 @@ def test_the_gate_detects_a_micro_newton_metre(stock_rollout):
     assert differs and differs[0] == 0, f"1e-6 N*m should show from the first step; first difference at {differs[:1]}"
 
 
+def test_a_shadow_controller_runs_and_applies_nothing():
+    from myoassist_utils.exo_ctrl import ShadowDevice
+
+    class _Assisting:
+        actuator_ids = (3, 4)
+        legs = ["right leg", "left leg"]
+        schedule = object()
+
+        def __init__(self):
+            self.calls = self.resets = 0
+
+        def reset(self):
+            self.resets += 1
+
+        def compute_torque(self, sim):
+            self.calls += 1
+            return (-12.0, -12.0)
+
+    inner = _Assisting()
+    shadow = ShadowDevice(inner)
+    assert shadow.actuator_ids == (3, 4) and shadow.legs == inner.legs and shadow.schedule is inner.schedule
+    assert [shadow.compute_torque(None) for _ in range(3)] == [(0.0, 0.0)] * 3
+    shadow.reset()
+    assert (inner.calls, inner.resets) == (3, 1), "the controller still runs on every substep, and is reset"
+
+
+def test_shadow_4pts_reproduces_the_stock_step_exactly(stock_rollout):
+    """4PTS in shadow mode runs on every substep, and the gait is the stock exo-off gait bit for bit."""
+    config = _config(SPLINE, flag_random_ref_index=False)
+    config.env_params.exo_controller_params.shadow_mode = True
+    shadow, calls = _rollout(config, GATE_STEPS)
+    assert calls == 40 * GATE_STEPS
+    for k, (s, d) in enumerate(zip(stock_rollout, shadow, strict=True)):
+        for key in ("qpos", "qvel", "act", "obs"):
+            assert np.array_equal(s[key], d[key]), f"step {k}: {key} differs by up to {np.max(np.abs(s[key] - d[key]))}"
+        assert (s["time"], s["reward"], s["done"]) == (d["time"], d["reward"], d["done"]), f"step {k}"
+
+
 def test_no_device_controller_is_the_stock_env():
     """With device_controller unset the device env installs nothing and its step is MujocoEnv.step itself."""
     env = _make(_config(env_id=DEVICE_ENV_ID))

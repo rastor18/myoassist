@@ -97,6 +97,10 @@ class ExoImitationTrainSessionConfig(ImitationTrainSessionConfig):
             # boot's own loop is 175 Hz, and the spline needs no more than 150 (its timing is in seconds and phase,
             # not samples).
             controller_rate_hz: float = 150.0
+            # Run the controller but apply none of its torque (device.ShadowDevice): the gait is the exo-off gait bit
+            # for bit, and the controller's diagnostics still report what it would do. For judging its sensing on a
+            # trained policy.
+            shadow_mode: bool = False
 
             # Stride-average gait phase, as on the ExoBoot. Phase is invalid (no torque) until
             # num_strides_required strides in a row fall inside the duration bounds.
@@ -117,6 +121,20 @@ class ExoImitationTrainSessionConfig(ImitationTrainSessionConfig):
             grf_off_newtons: float = 25.0
             min_unload_time: float = 0.05
             min_contact_time: float = 0.05
+
+            # For the controllers that run the boot's state machine and read its ankle encoder
+            # (myoassist_utils/exo_ctrl/boot_state.py); 4PTS uses neither. Each controller's configs set the values
+            # measured on the boot's logs of its own sessions; the defaults are the DL sessions'.
+            # Toe-off to swing, the boot's reel-out: no torque. On the DL sessions' logs, 167-175 ms per leg.
+            reel_out_time: float = 0.172
+            # What the boot's ankle angle reads at the standing keyframe, per side, deg: its reading in the quiet
+            # standing that starts each log (the DL sessions' mean here). Not CONFIG's <SIDE>_STANDING_ANGLE: the boot
+            # reads that during its calibration with the cable taut, 1-6 deg higher.
+            ankle_standing_angle_r_deg: float = -1.87
+            ankle_standing_angle_l_deg: float = -10.32
+            # The Dephy's resolution on the simulated boot sensors: one encoder click (360/2^14 deg) on the ankle angle,
+            # and 1/8192 g and 1/32.75 deg/s on a simulated IMU.
+            sensor_quantize: bool = True
 
         exo_controller_params: ExoControllerParams = field(default_factory=ExoControllerParams)
 

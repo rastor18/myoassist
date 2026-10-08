@@ -6,10 +6,13 @@ and the physical Dephy boot. See ``rl_train/train/train_configs/exoboot_spline/R
 
 from myoassist_utils.exo_ctrl.base import HeelStrikeDetector, LegExoController
 from myoassist_utils.exo_ctrl.boot_filters import Butterworth, DelayTimer
+from myoassist_utils.exo_ctrl.boot_state import AnkleEncoder, BootStateMachine
 from myoassist_utils.exo_ctrl.device import (
+    DEVICE_BUILDERS,
     DEVICE_CONTROLLERS,
     FixedRateLegExos,
     FootForce,
+    ShadowDevice,
     ZeroTorqueDevice,
     build_device_controller,
 )
@@ -20,7 +23,10 @@ from myoassist_utils.exo_ctrl.schedule import TickSchedule
 from myoassist_utils.exo_ctrl.torque_adapter import ankle_torque_actuator, torque_actuator_params
 
 __all__ = [
+    "DEVICE_BUILDERS",
     "DEVICE_CONTROLLERS",
+    "AnkleEncoder",
+    "BootStateMachine",
     "Butterworth",
     "DelayTimer",
     "ExoBootFourPointSplineController",
@@ -31,6 +37,7 @@ __all__ = [
     "HeelStrikeDetector",
     "LegExo",
     "LegExoController",
+    "ShadowDevice",
     "StrideAverageGaitPhaseEstimator",
     "TickSchedule",
     "VgrfHeelStrikeDetector",

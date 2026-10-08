@@ -1,16 +1,18 @@
-"""Roll a trained policy out with each in-loop exo controller, and check 4PTS against what it should deliver.
+"""Roll a trained policy out with an in-loop exo controller, and check it against what it should deliver.
 
-The policy walks; the device env's controller drives the exo. Three cases, each in its own env and all from the same
-start points in the reference motion, so they differ only in the exo:
+The policy walks; the device env's controller drives the exo. Each controller's suite (``SUITES``) names its cases and
+its checks. The cases run each in its own env and all from the same start points in the reference motion, so they
+differ only in the exo. 4PTS's:
 
   exo off        device_controller "zero"
   4PTS sensing   4PTS with peak and bias torque 0: it detects strikes and estimates phase but applies nothing, so the
                  gait must be the exo-off gait exactly
   4PTS           the config's 4PTS
 
-Every physics substep is recorded: each leg's commanded torque, the torque MuJoCo applied, foot force, and the
-controller's strike, phase, phase-valid and stance flags. The same 4PTS is also run on every substep of that record
-(``physics_rate_pass``): the controller at the physics rate, the reference the 150 Hz one is held to. Checked:
+Every physics substep is recorded: each leg's commanded torque, the torque MuJoCo applied, foot force, and, from the
+controller's ``diagnostics()``, its strike, phase, phase-valid and stance flags and its control state. The same 4PTS is
+also run on every substep of that record (``physics_rate_pass``): the controller at the physics rate, the reference the
+150 Hz one is held to. Checked:
 
   sensing   every stance (a contact lasting ``MIN_STANCE`` or more) is a strike in the loop, dated within a tick of its
             onset, and nothing else is -- such as a foot scuffing the ground in swing; so no stride is split; stride
@@ -23,12 +25,13 @@ controller's strike, phase, phase-valid and stance flags. The same 4PTS is also 
 Episodes run in evaluate mode at the config's target speed, and start at chosen indices of the reference motion
 (``reset_at``): the env's own reset draws the index from an unseeded generator. Physics and the deterministic policy
 are otherwise fixed, so each episode is reproducible from its index. Every ``--index-step``-th start index is tried
-with the exo off, and the longest that walk for at least ``--min-seconds`` (up to ``--max-kept``) are run in all three
-cases.
+with the exo off, and the longest that walk for at least ``--min-seconds`` (up to ``--max-kept``) are run in every
+case.
 
 Run from the repo root (configs name the reference data relative to it):
 
-    python tools/rollout_controllers.py <policy.zip> [--config <4PTS config>] [--min-seconds 8] [--out <dir>]
+    python tools/rollout_controllers.py <policy.zip> [--controller 4PTS] [--config <its config>] [--min-seconds 8]
+        [--out <dir>]
 
 Writes report.md, torque_vs_phase.png and episodes.npz to --out (default rl_train/results/rollouts/<time>).
 """
@@ -40,6 +43,7 @@ import dataclasses
 import datetime
 import json
 import pathlib
+from collections.abc import Callable, Sequence
 
 import numpy as np
 
@@ -52,11 +56,9 @@ from myoassist_utils.exo_ctrl.torque_adapter import PLANTARFLEXION_SIGN
 DEFAULT_CONFIG = pathlib.Path("rl_train/train/train_configs/exoboot_spline/imitation_22_DephyExoBoot_L1_exoboot_spline.json")
 DEVICE_ENV_ID = "myoAssistLegImitationExoDevice-v0"
 SIDES = ("r", "l")  # the device controllers' actuator order: right, then left
-CASES = {
-    "exo off": dict(device_controller="zero"),
-    "4PTS sensing": dict(device_controller="exoboot_spline", peak_torque=0.0, bias_torque=0.0),
-    "4PTS": dict(device_controller="exoboot_spline"),
-}
+# The case every controller is compared against, and whose sweep picks the start indices.
+EXO_OFF = "exo off"
+EXO_OFF_CASE = dict(device_controller="zero")
 STEP_JOINTS = ("pelvis_tx", "pelvis_ty", "ankle_angle_r", "ankle_angle_l")
 # Plot colors: the first two slots of the dataviz skill's validated categorical palette, then its ink and muted grays.
 DELIVERED, REFERENCE, INK, MUTED = "#2a78d6", "#eb6834", "#52514e", "#898781"
@@ -73,33 +75,30 @@ class Recorder:
     computed it, and re-aligned by ``take``.
     """
 
+    # Each leg's fields after the torques and foot forces, and the ``diagnostics()`` key each is read from. A key the
+    # controller does not report is NaN, except the strike time, which is then the time of the row reporting the strike.
+    # Diagnostics are read on every substep: between ticks they are the last tick's.
+    DIAGNOSTICS = (
+        ("strike", "heel_strike"),
+        ("phase", "phase"),
+        ("valid", "phase_valid"),
+        ("stance", "in_stance"),
+        ("strike_time", "strike_time"),
+        ("control_state", "control_state"),
+        ("stride_estimate", "stride_estimate"),
+    )
     FIELDS = (
         "t",
         "tick",
-        "cmd_r",
-        "cmd_l",
-        "applied_r",
-        "applied_l",
-        "grf_r",
-        "grf_l",
-        "strike_r",
-        "strike_l",
-        "phase_r",
-        "phase_l",
-        "valid_r",
-        "valid_l",
-        "stance_r",
-        "stance_l",
-        "strike_time_r",
-        "strike_time_l",
-        "control_state_r",
-        "control_state_l",
-        "stride_estimate_r",
-        "stride_estimate_l",
+        *(f"{name}_{side}" for name in ("cmd", "applied", "grf") for side in SIDES),
+        *(f"{name}_{side}" for name, _ in DIAGNOSTICS for side in SIDES),
     )
 
-    def __init__(self, inner, model):
+    def __init__(self, inner, model, extra_keys: Sequence[str] = ()):
+        """``extra_keys``: more ``diagnostics()`` keys to record, as ``<key>_<side>`` fields after ``FIELDS``."""
         self.inner = inner
+        self.extra_keys = tuple(extra_keys)
+        self.fields = self.FIELDS + tuple(f"{key}_{side}" for key in self.extra_keys for side in SIDES)
         self.actuator_ids = tuple(inner.actuator_ids)
         self._gear = [float(model.actuator_gear[a, 0]) for a in self.actuator_ids]
         self._feet = [FootForce(model, side) for side in SIDES]
@@ -128,24 +127,23 @@ class Recorder:
         row += [foot(sim) for foot in self._feet]
         if self._legs:
             diagnostics = [leg.controller.diagnostics() for leg in self._legs]
-            for key in ("heel_strike", "phase", "phase_valid", "in_stance"):
-                row += [d[key] for d in diagnostics]
-            # When a strike reported on this tick happened: a debounced detector dates it back to the contact's onset.
-            row += [
-                leg.controller.heel_strike_detector.strike_time if d["heel_strike"] else np.nan
-                for leg, d in zip(self._legs, diagnostics)
-            ]
-            for key in ("control_state", "stride_estimate"):
-                row += [d[key] for d in diagnostics]
+            for _, key in self.DIAGNOSTICS:
+                if key == "strike_time":
+                    # When the strike reported on this tick happened: a debounced detector dates it back to the
+                    # contact's onset.
+                    row += [d.get(key, row[0]) if d.get("heel_strike") == 1 else np.nan for d in diagnostics]
+                else:
+                    row += [d.get(key, np.nan) for d in diagnostics]
+            row += [d.get(key, np.nan) for key in self.extra_keys for d in diagnostics]
         else:
-            row += [np.nan] * 14
+            row += [np.nan] * (len(self.fields) - len(row))
         self._rows.append(row)
         return torques
 
     def take(self) -> dict[str, np.ndarray]:
         """The episode's record, one array per field, and a fresh start."""
-        table = np.array(self._rows, dtype=float).reshape(-1, len(self.FIELDS))
-        record = {name: table[:, i] for i, name in enumerate(self.FIELDS)}
+        table = np.array(self._rows, dtype=float).reshape(-1, len(self.fields))
+        record = {name: table[:, i] for i, name in enumerate(self.fields)}
         for side in SIDES:
             applied = np.full(len(table), np.nan)
             applied[:-1] = record[f"applied_{side}"][1:]  # read one substep later; the last one is never read
@@ -199,8 +197,9 @@ def run_episode(env, policy, recorder: Recorder, index: int, *, case: str, max_s
     return Episode(case, int(index), ending, float(env.dt), {k: np.array(v) for k, v in steps.items()}, recorder.take())
 
 
-def make_env(config_path: pathlib.Path, case: dict):
-    """The device env for one case, with a ``Recorder`` around its controller. Returns (env, config)."""
+def make_env(config_path: pathlib.Path, case: dict, extra_keys: Sequence[str] = ()):
+    """The device env for one case, with a ``Recorder`` around its controller (recording ``extra_keys`` too). Returns
+    (env, config)."""
     from rl_train.envs.environment_handler import EnvironmentHandler
 
     env_id = json.loads(pathlib.Path(config_path).read_text())["env_params"]["env_id"]
@@ -222,7 +221,7 @@ def make_env(config_path: pathlib.Path, case: dict):
     speed = (config.env_params.min_target_velocity + config.env_params.max_target_velocity) / 2
     env.set_target_velocity_mode_manually(type(env).VelocityMode.UNIFORM, 0.0, speed, speed, speed)
     model = getattr(env.sim.model, "ptr", env.sim.model)
-    env.set_device_controller(Recorder(env.device_controller, model))
+    env.set_device_controller(Recorder(env.device_controller, model, extra_keys))
     return env, config
 
 
@@ -483,7 +482,7 @@ def analyze(results: dict[str, list[Episode]], params, model, rate_hz: float) ->
     a["same_as_exo_off"] = max(
         (
             float(np.max(np.abs(off.steps[j] - on.steps[j]))) if len(off.steps[j]) == len(on.steps[j]) else np.inf
-            for off, on in zip(results["exo off"], results["4PTS sensing"])
+            for off, on in zip(results[EXO_OFF], results["4PTS sensing"])
             for j in STEP_JOINTS
         ),
         default=np.nan,
@@ -664,21 +663,65 @@ def save_episodes(results: dict[str, list[Episode]], path: pathlib.Path) -> None
     np.savez_compressed(path, **arrays)
 
 
+# --- the controllers' suites ----------------------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class Suite:
+    """One controller's rollouts: its device-env config, its cases, and its checks.
+
+    Every case runs in its own env from the start indices the exo-off sweep keeps, after the exo-off case itself. A
+    case is the ``device_controller`` and any ``exo_controller_params`` it overrides. ``extra_keys`` are
+    ``diagnostics()`` keys the ``Recorder`` records beyond its own fields.
+    """
+
+    config: pathlib.Path
+    cases: dict[str, dict]
+    analyze: Callable  # (results by case, params, model, rate_hz) -> analysis
+    plot: Callable  # (results, analysis, params, model, path to write)
+    report: Callable  # (analysis, *, policy, config_path, sweep, kept, rate_hz) -> markdown
+    extra_keys: tuple[str, ...] = ()
+
+
+SUITES = {
+    "4PTS": Suite(
+        config=DEFAULT_CONFIG,
+        cases={
+            "4PTS sensing": dict(device_controller="exoboot_spline", peak_torque=0.0, bias_torque=0.0),
+            "4PTS": dict(device_controller="exoboot_spline"),
+        },
+        analyze=analyze,
+        plot=plot,
+        report=report,
+    ),
+}
+# Every case by name, the exo-off one first.
+CASES = {EXO_OFF: EXO_OFF_CASE, **{name: case for suite in SUITES.values() for name, case in suite.cases.items()}}
+
+
+def suite_of(case: str) -> Suite | None:
+    """The suite a case belongs to; None for the exo-off case, which they all share."""
+    return next((suite for suite in SUITES.values() if case in suite.cases), None)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("policy", type=pathlib.Path, help="a trained policy's .zip")
-    parser.add_argument("--config", type=pathlib.Path, default=DEFAULT_CONFIG, help="a 4PTS device-env config")
+    parser.add_argument("--controller", choices=list(SUITES), default="4PTS", help="whose cases and checks to run")
+    parser.add_argument("--config", type=pathlib.Path, default=None, help="its device-env config (default: its own)")
     parser.add_argument("--min-seconds", type=float, default=8.0, help="keep start indices that walk at least this long")
     parser.add_argument("--max-kept", type=int, default=10, help="at most this many, the longest")
     parser.add_argument("--index-step", type=int, default=20, help="try every n-th start index (30 Hz reference)")
     parser.add_argument("--out", type=pathlib.Path, default=None)
     args = parser.parse_args(argv)
+    suite = SUITES[args.controller]
+    config_path = args.config or suite.config
     out = args.out or pathlib.Path("rl_train/results/rollouts") / datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
 
     policy = load_policy(args.policy)
     results: dict[str, list[Episode]] = {}
-    env, config = make_env(args.config, CASES["exo off"])
+    env, config = make_env(config_path, EXO_OFF_CASE)
     if policy.observation_space.shape != env.observation_space.shape:
         raise ValueError(
             f"the policy takes observations of shape {policy.observation_space.shape}, the config's env gives "
@@ -689,30 +732,30 @@ def main(argv=None):
     starts = range(0, int(env._reference_data_length * 0.8), args.index_step)
     sweep = []
     for n, index in enumerate(starts, 1):
-        ep = run_episode(env, policy, env.device_controller, index, case="exo off", **run)
+        ep = run_episode(env, policy, env.device_controller, index, case=EXO_OFF, **run)
         sweep.append((index, ep.duration))
         print(f"exo off, start {index} ({n}/{len(starts)}): {ep.duration:.1f} s, {ep.ending}", flush=True)
     long_enough = sorted((d, i) for i, d in sweep if d >= args.min_seconds)[::-1][: args.max_kept]
     kept = sorted(i for _, i in long_enough)
     print(f"{len(kept)} of {len(sweep)} start indices kept (at least {args.min_seconds:g} s): {kept}", flush=True)
     if not kept:
-        raise SystemExit("no episode walked long enough to test 4PTS; lower --min-seconds or use another policy")
-    for case in CASES:
-        if case != "exo off":
+        raise SystemExit(f"no episode walked long enough to test {args.controller}; lower --min-seconds or use another policy")
+    for case in (EXO_OFF, *suite.cases):
+        if case != EXO_OFF:
             env.close()
-            env, config = make_env(args.config, CASES[case])
+            env, config = make_env(config_path, suite.cases[case], suite.extra_keys)
         results[case] = [run_episode(env, policy, env.device_controller, i, case=case, **run) for i in kept]
         print(f"{case}: " + ", ".join(f"{e.start_index} {e.duration:.1f} s {e.ending}" for e in results[case]), flush=True)
 
-    # The 4PTS case's env and parameters, kept open for the analysis: it rebuilds the controller on this model.
+    # The last case's env and parameters, kept open for the analysis: it may rebuild the controller on this model.
     model = getattr(env.sim.model, "ptr", env.sim.model)
     params = config.env_params.exo_controller_params
     rate_hz = params.controller_rate_hz
-    analysis = analyze(results, params, model, rate_hz)
-    plot(results, analysis, params, model, out / "torque_vs_phase.png")
+    analysis = suite.analyze(results, params, model, rate_hz)
+    suite.plot(results, analysis, params, model, out / "torque_vs_phase.png")
     env.close()
     (out / "report.md").write_text(
-        report(analysis, policy=args.policy, config_path=args.config, sweep=sweep, kept=kept, rate_hz=rate_hz),
+        suite.report(analysis, policy=args.policy, config_path=config_path, sweep=sweep, kept=kept, rate_hz=rate_hz),
         encoding="utf-8",
     )
     save_episodes(results, out / "episodes.npz")
