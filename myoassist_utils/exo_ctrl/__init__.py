@@ -1,21 +1,25 @@
 """Scripted exoskeleton controllers that run inside the RL environment in place of learned exo torque.
 
 Ported from the NeuMove ExoBoot hardware controller so that the same parameters drive the simulated
-and the physical Dephy boot. See ``rl_train/train/train_configs/exoboot_spline/README.md``.
+and the physical Dephy boot. See ``rl_train/train/train_configs/exoboot_spline/README.md`` and
+``rl_train/train/train_configs/exoboot_dl/README.md``.
 """
 
 from myoassist_utils.exo_ctrl.base import HeelStrikeDetector, LegExoController
 from myoassist_utils.exo_ctrl.boot_filters import Butterworth, DelayTimer
+from myoassist_utils.exo_ctrl.boot_sensors import BootSensorFrontEnd, OutOfPlaneFilter, add_boot_imus
 from myoassist_utils.exo_ctrl.boot_state import AnkleEncoder, BootStateMachine
 from myoassist_utils.exo_ctrl.device import (
     DEVICE_BUILDERS,
     DEVICE_CONTROLLERS,
+    NEEDS_BOOT_SENSORS,
     FixedRateLegExos,
     FootForce,
     ShadowDevice,
     ZeroTorqueDevice,
     build_device_controller,
 )
+from myoassist_utils.exo_ctrl.dl_controller import DLLeg, ExoBootDLDevice, SpeedActivation
 from myoassist_utils.exo_ctrl.factory import LegExo, build_leg_exos
 from myoassist_utils.exo_ctrl.fourpoint_spline import ExoBootFourPointSplineController, FourPointSpline
 from myoassist_utils.exo_ctrl.phase import GyroHeelStrikeDetector, StrideAverageGaitPhaseEstimator, VgrfHeelStrikeDetector
@@ -25,10 +29,14 @@ from myoassist_utils.exo_ctrl.torque_adapter import ankle_torque_actuator, torqu
 __all__ = [
     "DEVICE_BUILDERS",
     "DEVICE_CONTROLLERS",
+    "NEEDS_BOOT_SENSORS",
     "AnkleEncoder",
+    "BootSensorFrontEnd",
     "BootStateMachine",
     "Butterworth",
+    "DLLeg",
     "DelayTimer",
+    "ExoBootDLDevice",
     "ExoBootFourPointSplineController",
     "FixedRateLegExos",
     "FootForce",
@@ -37,11 +45,14 @@ __all__ = [
     "HeelStrikeDetector",
     "LegExo",
     "LegExoController",
+    "OutOfPlaneFilter",
     "ShadowDevice",
+    "SpeedActivation",
     "StrideAverageGaitPhaseEstimator",
     "TickSchedule",
     "VgrfHeelStrikeDetector",
     "ZeroTorqueDevice",
+    "add_boot_imus",
     "ankle_torque_actuator",
     "build_device_controller",
     "build_leg_exos",

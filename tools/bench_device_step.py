@@ -5,6 +5,7 @@ The three-way comparison Hyoungseo asked for, on the same seeded actions:
 * **stock**: the exo env under the exo-off config, myosuite's own step;
 * **device, zero torque**: the device env with a controller that applies nothing -- the cost of the split-up step alone;
 * **device, ExoBoot 4PTS 150 Hz**: the device env with the ExoBoot four-point spline;
+* **device, ExoBoot DL 175 Hz**: the DL task -- simulated boot sensors and the network on both legs every tick.
 
 Training runs its envs in separate processes (SubprocVecEnv), so the overhead is per env and the single-env ratio
 is the training-throughput ratio. Only ``env.step`` is timed; resets are not. Rounds interleave the cases so that
@@ -34,10 +35,13 @@ EXO_OFF = CONFIG_DIR / "imitation_22_DephyExoBoot_L1_exo_off.json"
 SPLINE = CONFIG_DIR / "imitation_22_DephyExoBoot_L1_exoboot_spline.json"
 DEVICE_ENV_ID = "myoAssistLegImitationExoDevice-v0"
 
+DL = REPO_ROOT / "rl_train/train/train_configs/exoboot_dl/imitation_22_DephyExoBoot_L1_exoboot_dl.json"
+
 CASES = {
     "stock": (EXO_OFF, {}),
     "device, zero torque": (EXO_OFF, {"env_id": DEVICE_ENV_ID, "device_controller": "zero"}),
     "device, ExoBoot 4PTS 150 Hz": (SPLINE, {}),
+    "device, ExoBoot DL 175 Hz": (DL, {}),
 }
 
 

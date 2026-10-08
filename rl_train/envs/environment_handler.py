@@ -132,6 +132,16 @@ class EnvironmentHandler:
                 "compose keys; a config carrying neither is a migration oversight."
             )
 
+        # A device controller that reads the boot's own sensors needs them in the model: an IMU in each actuator pack.
+        from myoassist_utils.exo_ctrl.device import NEEDS_BOOT_SENSORS
+
+        if getattr(config.env_params, "device_controller", "") in NEEDS_BOOT_SENSORS:
+            from myoassist_utils.exo_ctrl.boot_sensors import add_boot_imus
+
+            if "<mujoco" not in model_path:
+                raise ValueError(f"device_controller={config.env_params.device_controller!r} needs a composed model")
+            model_path = add_boot_imus(model_path)
+
         # Base gym.make arguments
         gym_make_args = {
             "seed": config.env_params.seed,

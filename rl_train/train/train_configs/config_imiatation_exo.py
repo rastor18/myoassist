@@ -95,12 +95,41 @@ class ExoImitationTrainSessionConfig(ImitationTrainSessionConfig):
             reel_in_time: float = 0.157
             # Rate of the device_controller, inside the 1200 Hz physics. 150 Hz ticks exactly every 8 substeps; the
             # boot's own loop is 175 Hz, and the spline needs no more than 150 (its timing is in seconds and phase,
-            # not samples).
+            # not samples). "exoboot_dl" needs 175: its network was trained on 175 Hz samples, and it refuses any
+            # other rate.
             controller_rate_hz: float = 150.0
             # Run the controller but apply none of its torque (device.ShadowDevice): the gait is the exo-off gait bit
             # for bit, and the controller's diagnostics still report what it would do. For judging its sensing on a
             # trained policy.
             shadow_mode: bool = False
+
+            # The DL task (device_controller "exoboot_dl"): the 4-headed network, as in mle_config.
+            # Weights recovered from the Jetson's engine by tools/recover_gait_net.py, relative to the repo root.
+            dl_weights_path: str = "rl_train/train/train_configs/exoboot_dl/gait_net_4headed.npz"
+            dl_float32: bool = True
+            # The planar leg model cannot move the shank out of the sagittal plane, so the IMU's accel z and gyro x/y
+            # are only the mount's crosstalk, and the network's stance phase is off by RMSE 0.04-0.05. A .npz from
+            # tools/calibrate_boot_sensors.py --save-filter synthesizes them from gyro z and the ankle velocity
+            # instead (RMSE 0.02 on a held-out session). Relative to the repo root; "" = the planar channels.
+            dl_out_of_plane_filter_path: str = ""
+            # The reply a leg uses is this many ticks old: the DL validation sessions' logs show one, staler on
+            # 0.02-0.3% of rows.
+            dl_latency_ticks: int = 1
+            # When assistance runs: "speed", the boot's DL_SPEEDACTIVATION criterion -- on when the network's filtered
+            # speed crosses up through dl_speed_on m/s, off when it falls through dl_speed_off -- or "always".
+            dl_assist_on: str = "speed"
+            dl_speed_on: float = 0.7
+            dl_speed_off: float = 0.5
+            # The simulated IMU's rotation in its own frame (x forward, y up the shank, z right), deg: roll about x,
+            # pitch about y (the shank), yaw about z (the sagittal tilt); 0 = square on. Fit to the DL validation
+            # sessions' standing gravity and swing gyro axis (tools/calibrate_boot_sensors.py; the two sessions agree
+            # within 1.2 deg).
+            imu_mount_r_roll_deg: float = -2.27
+            imu_mount_r_pitch_deg: float = -14.72
+            imu_mount_r_yaw_deg: float = -3.46
+            imu_mount_l_roll_deg: float = 1.1
+            imu_mount_l_pitch_deg: float = 10.87
+            imu_mount_l_yaw_deg: float = -5.38
 
             # Stride-average gait phase, as on the ExoBoot. Phase is invalid (no torque) until
             # num_strides_required strides in a row fall inside the duration bounds.
@@ -140,8 +169,9 @@ class ExoImitationTrainSessionConfig(ImitationTrainSessionConfig):
 
         # The scripted controller that drives the exo from inside the physics loop, on every physics substep: ""
         # (none: the policy's exo actions apply), "zero" (no torque), "exoboot_spline" (the ExoBoot four-point
-        # spline at exo_controller_params.controller_rate_hz). Its parameters are read from exo_controller_params.
-        # Needs env_id myoAssistLegImitationExoDevice-v0.
+        # spline at exo_controller_params.controller_rate_hz), or "exoboot_dl" (the boot's DL task, from simulated
+        # boot sensors). Its parameters are read from exo_controller_params. Needs env_id
+        # myoAssistLegImitationExoDevice-v0.
         device_controller: str = ""
 
     env_params: EnvParams = field(default_factory=EnvParams)

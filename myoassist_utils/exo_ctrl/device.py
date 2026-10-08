@@ -15,9 +15,13 @@ from collections.abc import Callable, Sequence
 
 import mujoco
 
+from myoassist_utils.exo_ctrl.dl_controller import build_dl_device
 from myoassist_utils.exo_ctrl.factory import LegExo, build_leg_exos
 from myoassist_utils.exo_ctrl.schedule import TickSchedule
 from myoassist_utils.exo_ctrl.torque_adapter import PLANTARFLEXION_SIGN
+
+# Device controllers that read the simulated boot sensors, which the model has to be composed with.
+NEEDS_BOOT_SENSORS = frozenset({"exoboot_dl"})
 
 
 class ZeroTorqueDevice:
@@ -145,6 +149,7 @@ def _build_spline(params, model: mujoco.MjModel, *, physics_rate_hz: float) -> F
 DEVICE_BUILDERS: dict[str, Callable[..., object]] = {
     "zero": _build_zero,
     "exoboot_spline": _build_spline,
+    "exoboot_dl": build_dl_device,
 }
 DEVICE_CONTROLLERS = tuple(DEVICE_BUILDERS)
 
