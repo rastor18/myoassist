@@ -116,10 +116,6 @@
             "l_ankle_sensor",
             "l_mtp_sensor"
         ],
-        "reset_keyframe_joint_keys": [
-            "KFoot_L1_df_ankle_angle_r",
-            "KFoot_L1_pf_ankle_angle_r"
-        ],
         "out_of_trajectory_joint_keys": [
             "ankle_angle_l",
             "hip_flexion_l",

@@ -99,7 +99,6 @@ def test_reference_and_imitation_keys_exist_in_model(config_path):
         rewards = env_params["reward_keys_and_weights"]
         named = (
             set(env_params["reference_data_keys"])
-            | set(env_params["reset_keyframe_joint_keys"])
             | set(rewards["qpos_imitation_rewards"])
             | set(rewards["qvel_imitation_rewards"])
             | set(env_params["observation_joint_pos_keys"])
@@ -226,11 +225,10 @@ def test_fall_margin_matches_the_intact_configs(config_path):
 def test_prosthetic_joints_reset_to_keyframe(config_path):
     """The prosthesis' own DOFs start each episode at the keyframe, not where the last fall left them.
 
-    `reset` seeds the next episode from `sim.data.qpos`, so a joint the reference does not write
-    carries across the episode boundary. The prosthetic joint is the one the device actuator
-    drives and the healthy reference says nothing about it, so before
-    `reset_keyframe_joint_keys` existed it started successive episodes at +1.43 and +1.94 rad
-    against its own +-0.52 rad limit.
+    The prosthetic joint is the one the device actuator drives and the healthy reference says
+    nothing about it, so when `reset` left the joints the reference does not write where the last
+    episode ended, it started successive episodes at +1.43 and +1.94 rad against its own
+    +-0.52 rad limit. See MyoAssistLegImitation._set_episode_start_state.
     """
     device = _device_of(config_path)
     _, prosthetic_joints = EXPECTED[device][2], EXPECTED[device][3]

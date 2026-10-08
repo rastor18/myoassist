@@ -166,13 +166,11 @@ The price is the instrument that belongs here. `exo_activation_penalty` is 1.0, 
 10/18 = 0.56 per actuator. Note it was measured at only 1.3% of the weighted objective on the
 annealed run, so it is not by itself what stopped the motor being used — the cap was.
 
-**`reset_keyframe_joint_keys` names the prosthetic joints.** `reset` seeds the next episode from
-`sim.data.qpos`, so a DOF the reference does not write carries its value across the episode
-boundary — normally the value it held while the model was falling. On an intact model that is only
-the passive toe joints. Here it is the joint the device actuator drives: measured on
-`OpenSourceLeg_A_L1` before this field existed, successive episodes started at +1.43 and +1.94 rad
-against a ±0.52 rad limit. The field is opt-in so the intact configs keep the reset behaviour their
-published results were trained under.
+**Every joint starts each episode at the keyframe.** `reset` used to write only the reference
+joints and leave every other DOF where the previous episode's fall left it. Here that includes the
+joint the device actuator drives: measured on `OpenSourceLeg_A_L1`, successive episodes started at
++1.43 and +1.94 rad against a ±0.52 rad limit. `reset` now starts every DOF at the keyframe before
+writing the reference, so the prosthetic joints need no config entry.
 
 **`mirror_coef` is 0.** The mirror penalty needs a left/right actuator permutation, and
 `rl_train/train/policies/mirror.py` raises on an asymmetric model — correctly, since there is no

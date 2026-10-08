@@ -1,4 +1,5 @@
 import collections
+import mujoco
 import numpy as np
 from rl_train.envs.myoassist_leg_base import MyoAssistLegBase
 from rl_train.train.train_configs.config import TrainSessionConfigBase
@@ -111,6 +112,12 @@ class MyoAssistLegImitation(MyoAssistLegBase):
     # 1 cm of the reference, STRIDE_L2's sole pads put it 5.5 cm above it.
     REFERENCE_HEIGHT_CORRECTION_THRESHOLD = 0.02
 
+    # Gauss-Newton budget and tolerance for putting the DOFs the reference does not set onto the
+    # equality constraints at reset. A joint coupling is linear in the coupled joint once the
+    # reference fixes its driver, so the shipped compositions converge in one or two iterations.
+    EQUALITY_PROJECTION_MAX_ITERATIONS = 20
+    EQUALITY_PROJECTION_TOLERANCE = 1e-10
+
     # automatically inherit from MyoAssistLegBase
     # DEFAULT_OBS_KEYS = ['qpos',
     #                     'qvel',
@@ -130,7 +137,7 @@ class MyoAssistLegImitation(MyoAssistLegBase):
         self._out_of_trajectory_threshold = env_params.out_of_trajectory_threshold
         self._out_of_trajectory_joint_keys = env_params.out_of_trajectory_joint_keys
         self.reference_data_keys = env_params.reference_data_keys
-        self._reset_keyframe_joint_keys = env_params.reset_keyframe_joint_keys
+        self._unreferenced_dofs = self._dofs_not_in_reference()
         self._scale_reference_playback = env_params.scale_reference_playback
         self._imitation_index_exact = None
         self._loop_reference_data = loop_reference_data
@@ -282,29 +289,86 @@ class MyoAssistLegImitation(MyoAssistLegBase):
 
         return rwd_dict
 
-    def _reset_keyframe_joints(self):
-        """Restore the joints the reference cannot supply to the model's standing keyframe.
+    def _dofs_not_in_reference(self) -> np.ndarray:
+        model = self.sim.model.ptr
+        referenced = []
+        for key in self.reference_data_keys:
+            joint_id = model.joint(key).id
+            assert model.jnt_type[joint_id] in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE), (
+                f"reference joint {key} is not a hinge or slide, so one reference value cannot set it"
+            )
+            referenced.append(model.jnt_dofadr[joint_id])
+        return np.setdiff1d(np.arange(model.nv), referenced)
 
-        `reset` seeds the next episode from `sim.data.qpos`, so a DOF the reference does not
-        write keeps whatever value it held when the last episode ended -- which is normally the
-        value it held while the model was falling. On an intact model the only such DOFs are the
-        passive toe joints, and the configs have always run that way.
+    def _set_episode_start_state(self):
+        """Write every DOF of the state an episode starts from.
 
-        An amputee model makes the same carry-over a real problem: the prosthesis' own joint is
-        the one the device actuator drives, and the reference is a healthy walker with no
-        trajectory for it. Left alone it starts each episode wherever the previous fall left it,
-        routinely outside its own limit -- the OSL ankle is limited to +-0.52 rad and was
-        measured starting successive episodes at +1.43 and +1.94 rad, so every step after the
-        first fall ran against a large limit-constraint force that has nothing to do with gait.
+        The start depends only on the reference index and the target velocity, never on how the
+        previous episode ended. `reset` hands the simulation reset `sim.data.qpos` and `qvel` as
+        they stand, and this used to write only the reference joints, so every other DOF kept
+        the value the previous episode's fall left it at: the toes, the prosthesis' own joints,
+        and the joints equality constraints tie to the knees and hips. Two resets to one index
+        then started differently, the tied joints started off their constraints for the solver
+        to pull back on the first step, and the OSL ankle started successive episodes at +1.43
+        and +1.94 rad against its +-0.52 rad limit.
 
-        Opt-in through `reset_keyframe_joint_keys` rather than applied to every joint the
-        reference omits, so the intact configs -- and the results already trained from them --
-        keep the reset behaviour they were trained under.
+        Every DOF starts at the model's first keyframe, the reference joints take the reference,
+        and the DOFs the equality constraints tie to them are then moved onto those constraints.
         """
-        for key in self._reset_keyframe_joint_keys:
-            joint_id = self.sim.model.joint(key).id
-            self.sim.data.joint(key).qpos = self.sim.model.key_qpos[0][self.sim.model.jnt_qposadr[joint_id]]
-            self.sim.data.joint(key).qvel = self.sim.model.key_qvel[0][self.sim.model.jnt_dofadr[joint_id]]
+        self.sim.data.qpos[:] = self.sim.model.key_qpos[0]
+        self.sim.data.qvel[:] = self.sim.model.key_qvel[0]
+        self._follow_reference_motion(False)
+        self._place_unreferenced_dofs_on_equality_constraints()
+
+    def _place_unreferenced_dofs_on_equality_constraints(self):
+        """Move the DOFs the reference does not set so that every equality constraint holds.
+
+        Gauss-Newton on MuJoCo's own equality residual and its Jacobian, over the unreferenced
+        DOFs only, so the reference pose is left as it is. Reading both off the solver rather
+        than re-deriving each constraint covers every equality type and chained couplings
+        (STRIDE_L2 ties joints to joints that are themselves tied) without a case per type. The
+        velocity is then put on the constraints' tangent the same way, which for a joint
+        coupling y = f(x) is the chain rule y' = f'(x) x'.
+
+        A composition whose constraints cannot all hold at the reference pose fails the
+        assertion rather than starting episodes that the solver has to tear apart.
+        """
+        model, data = self.sim.model.ptr, self.sim.data.ptr
+        dofs = self._unreferenced_dofs
+        residual, jacobian = self._equality_residual_and_jacobian()
+        for _ in range(self.EQUALITY_PROJECTION_MAX_ITERATIONS):
+            if np.max(np.abs(residual), initial=0.0) < self.EQUALITY_PROJECTION_TOLERANCE:
+                break
+            step = np.zeros(model.nv)
+            step[dofs] = -np.linalg.lstsq(jacobian[:, dofs], residual, rcond=None)[0]
+            mujoco.mj_integratePos(model, data.qpos, step, 1.0)
+            residual, jacobian = self._equality_residual_and_jacobian()
+        worst = np.max(np.abs(residual), initial=0.0)
+        assert worst < self.EQUALITY_PROJECTION_TOLERANCE, (
+            f"the equality constraints cannot all hold at reference index {self._imitation_index}: "
+            f"residual {worst:.3g} after {self.EQUALITY_PROJECTION_MAX_ITERATIONS} iterations. The composed "
+            "model's constraints disagree with its kinematics, so the episode has no consistent start state."
+        )
+        correction = np.zeros(model.nv)
+        correction[dofs] = -np.linalg.lstsq(jacobian[:, dofs], jacobian @ data.qvel, rcond=None)[0]
+        data.qvel[:] += correction
+
+    def _equality_residual_and_jacobian(self) -> tuple[np.ndarray, np.ndarray]:
+        model, data = self.sim.model.ptr, self.sim.data.ptr
+        mujoco.mj_fwdPosition(model, data)
+        rows = np.flatnonzero(data.efc_type[: data.nefc] == mujoco.mjtConstraint.mjCNSTR_EQUALITY)
+        if mujoco.mj_isSparse(model):
+            jacobian = np.zeros((data.nefc, model.nv))
+            mujoco.mju_sparse2dense(
+                jacobian,
+                data.efc_J,
+                data.efc_J_rownnz[: data.nefc],
+                data.efc_J_rowadr[: data.nefc],
+                data.efc_J_colind,
+            )
+        else:
+            jacobian = data.efc_J[: data.nefc * model.nv].reshape(data.nefc, model.nv)
+        return data.efc_pos[rows].copy(), jacobian[rows].copy()
 
     def _follow_reference_motion(self, is_x_follow: bool):
         for key in self.reference_data_keys:
@@ -518,10 +582,11 @@ class MyoAssistLegImitation(MyoAssistLegBase):
         # generate random targets
         # new_qpos = self.generate_qpos()# TODO: should set qvel too.
         # self.sim.data.qpos = new_qpos
-        self._reset_keyframe_joints()
-        self._follow_reference_motion(False)
+        # The target velocity first: the start state scales the reference velocities by it.
+        self._start_target_velocity_schedule()
+        self._set_episode_start_state()
 
-        obs = super().reset(reset_qpos=self.sim.data.qpos, reset_qvel=self.sim.data.qvel, **kwargs)
+        obs = self._reset_simulation(reset_qpos=self.sim.data.qpos, reset_qvel=self.sim.data.qvel, **kwargs)
         return obs
 
     # override

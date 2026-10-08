@@ -406,11 +406,6 @@ def main() -> None:
 
         # -- reference and imitation keys ------------------------------------------------
         env["reference_data_keys"] = _keep_present(template_env["reference_data_keys"], facts["joints"])
-        # The reference writes nothing to the prosthetic DOFs, and `reset` seeds the next episode
-        # from the current qpos, so without this they start each episode wherever the last fall
-        # left them -- measured well outside their own limits. See
-        # MyoAssistLegImitation._reset_keyframe_joints.
-        env["reset_keyframe_joint_keys"] = sorted(set(prosthetic_pos) | set(prosthetic_vel))
         rewards = env["reward_keys_and_weights"]
         side = _amputated_side(prosthetic_pos)
         for block in ("qpos_imitation_rewards", "qvel_imitation_rewards"):
