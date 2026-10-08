@@ -663,6 +663,342 @@ def save_episodes(results: dict[str, list[Episode]], path: pathlib.Path) -> None
     np.savez_compressed(path, **arrays)
 
 
+# --- VNMC ------------------------------------------------------------------------------------------------------------
+
+VNMC_CONFIG = pathlib.Path("rl_train/train/train_configs/exoboot_vnmc/imitation_22_DephyExoBoot_L1_exoboot_vnmc.json")
+VNMC_SHADOW, VNMC_ASSIST = "VNMC shadow", "VNMC"
+# The would-be command (recorded even in shadow mode, where the applied one is zero) and the VNMC's own diagnostics.
+VNMC_EXTRA_KEYS = (
+    "torque_nm",
+    "mtu_force",
+    "length_ce",
+    "velocity_ce",
+    "vnmc_torque",
+    "m_stim",
+    "scalefactor",
+    "stance_time",
+    "ankle_angle_deg",
+)
+# The muscle-side quantities whose ranges are compared with the boot's logs (VNMC_LOG_RANGES).
+VNMC_RANGE_KEYS = ("ankle_angle_deg", "mtu_force", "length_ce", "velocity_ce", "vnmc_torque", "m_stim", "scalefactor")
+# On the VNMC sessions' logs, per leg (p1 and p99 of every row while walking at constant parameters, the mean of the two
+# sessions), for the report to set the policy's ranges against: the muscle follows the absolute ankle angle, so a gait
+# with another ankle range, or another standing angle, drives it elsewhere.
+VNMC_LOG_RANGES = {
+    "r": {
+        "ankle_angle_deg": (-7.27, 20.85),
+        "mtu_force": (0.003, 0.148),
+        "length_ce": (0.682, 0.996),
+        "velocity_ce": (-0.324, 1.001),
+        "vnmc_torque": (0.41, 23.6),
+        "m_stim": (0.01, 0.227),
+        "scalefactor": (1.10, 2.58),
+    },
+    "l": {
+        "ankle_angle_deg": (-11.79, 15.02),
+        "mtu_force": (0.002, 0.218),
+        "length_ce": (0.697, 1.026),
+        "velocity_ce": (-0.354, 1.001),
+        "vnmc_torque": (0.37, 34.8),
+        "m_stim": (0.01, 0.330),
+        "scalefactor": (0.74, 1.74),
+    },
+}
+STANCE_STATE = 4  # boot_state.STANCE
+
+
+def runs_of(t: np.ndarray, state: np.ndarray, value: float) -> list[tuple[float, float]]:
+    """(start, end) time of each run of ``state == value``: from its first sample to the first sample after it (NaN if
+    it lasts to the end of the record)."""
+    on = np.concatenate([[False], state == value, [False]])
+    edges = np.flatnonzero(np.diff(on.astype(int)))
+    return [(t[a], t[b] if b < len(t) else np.nan) for a, b in zip(edges[::2], edges[1::2])]
+
+
+def vnmc_stance_table(t: np.ndarray, state: np.ndarray, onsets: np.ndarray) -> dict[str, np.ndarray]:
+    """Per complete VNMC stance (control_state 4): its duration, the number of foot-contact onsets inside it (one or more
+    means it ran through swing into the next step), and where it ended on the true stride it started in (time since
+    that stride's contact onset over the stride's duration; NaN outside a complete stride)."""
+    durations, through, end_phase = [], [], []
+    for a, b in runs_of(t, state, STANCE_STATE):
+        if not np.isfinite(b):
+            continue
+        durations.append(b - a)
+        through.append(int(np.count_nonzero((onsets > a) & (onsets < b))))
+        k = np.searchsorted(onsets, a, side="right") - 1
+        end_phase.append((b - onsets[k]) / (onsets[k + 1] - onsets[k]) if 0 <= k < len(onsets) - 1 else np.nan)
+    return {"duration": np.array(durations), "through": np.array(through), "end_phase": np.array(end_phase)}
+
+
+def _ranges(values: np.ndarray) -> tuple[float, float]:
+    values = values[np.isfinite(values)]
+    return (float(np.percentile(values, 1)), float(np.percentile(values, 99))) if len(values) else (np.nan, np.nan)
+
+
+def analyze_vnmc(results: dict[str, list[Episode]], params, model, rate_hz: float) -> dict:
+    """The VNMC's checks, per leg: sensing and the would-be torque in shadow mode, the delivered torque assisting, the
+    stances (how long, how many ran through swing, where they ended), the muscle's ranges, and the gait."""
+    tick = 1.0 / rate_hz
+    a = {"tick_s": tick, "min_stride": params.min_stride_duration, "legs": {}, "gait": [], "nonfinite": []}
+
+    def stances(ep, side):
+        s = ep.substeps
+        onsets, ends = contacts(
+            s["t"], s[f"grf_{side}"], on=params.grf_on_newtons, off=params.grf_off_newtons, min_unload=params.min_unload_time
+        )
+        return split_contacts(onsets, ends, s["t"][-1])
+
+    for side in SIDES:
+        leg = dict(delays=[], missed=0, false=0, touches=0, loop_strides=[], cases={})
+        for ep in results[VNMC_SHADOW]:
+            s = ep.substeps
+            stance_onsets, _, touches, undetermined = stances(ep, side)
+            reported = (s["tick"] == 1) & (s[f"strike_{side}"] == 1)
+            loop = s[f"strike_time_{side}"][reported]
+            loop = np.array([f for f in loop if not np.any(np.abs(undetermined - f) <= tick + 1e-9)])
+            delays, missed, false = strike_delays(loop, stance_onsets, max_delay=tick + 1e-9)
+            leg["delays"] += list(delays)
+            leg["missed"] += missed
+            leg["false"] += len(false)
+            leg["touches"] += len(touches)
+            leg["loop_strides"] += list(np.diff(loop))
+        for case in (VNMC_SHADOW, VNMC_ASSIST):
+            c = dict(duration=[], through=[], end_phase=[], raw_peak=[], peak=[], impulse=[], profiles=[], share={})
+            c.update(applied_error=0.0, off_tick=0, max_stance_time=0.0, ranges={})
+            pooled = {key: [] for key in VNMC_RANGE_KEYS}
+            states = []
+            for ep in results[case]:
+                s = ep.substeps
+                t, state = s["t"], s[f"control_state_{side}"]
+                onsets = stances(ep, side)[0]
+                table = vnmc_stance_table(t, state, onsets)
+                for key in ("duration", "through", "end_phase"):
+                    c[key] += list(table[key])
+                command = s[f"torque_nm_{side}"]
+                for a_, b_ in runs_of(t, state, STANCE_STATE):
+                    inside = (t >= a_) & (t < (b_ if np.isfinite(b_) else np.inf))
+                    c["raw_peak"].append(float(s[f"vnmc_torque_{side}"][inside].max()))
+                    c["peak"].append(float(command[inside].max()))
+                dt = float(np.median(np.diff(t)))
+                c["impulse"] += [float(command[(t >= x) & (t < y)].sum() * dt) for x, y in zip(onsets[:-1], onsets[1:])]
+                _, rows = stride_average(t, command, onsets)
+                c["profiles"] += list(rows)
+                c["max_stance_time"] = max(c["max_stance_time"], float(np.nanmax(s[f"stance_time_{side}"])))
+                # Once the first stance has begun: before it the muscle idles at rest and says nothing about the gait.
+                walking = t >= (runs_of(t, state, STANCE_STATE) or [(np.inf, np.inf)])[0][0]
+                states.append(state[walking])
+                for key in VNMC_RANGE_KEYS:
+                    pooled[key].append(s[f"{key}_{side}"][walking])
+                if case == VNMC_ASSIST:
+                    cmd, applied = s[f"cmd_{side}"], s[f"applied_{side}"]
+                    c["applied_error"] = max(c["applied_error"], float(np.nanmax(np.abs(applied - cmd))))
+                    c["off_tick"] += changes_off_tick(cmd, s["tick"])
+            states = np.concatenate(states) if states else np.zeros(0)
+            c["share"] = {k: float(np.mean(states == k)) if len(states) else np.nan for k in (1, 2, 3, 4)}
+            c["ranges"] = {key: _ranges(np.concatenate(v)) if v else (np.nan, np.nan) for key, v in pooled.items()}
+            leg["cases"][case] = c
+        a["legs"][side] = leg
+    for case, eps in results.items():
+        for ep in eps:
+            recorded = [ep.substeps[k] for k in ("t", "cmd_r", "cmd_l", "grf_r", "grf_l")] + list(ep.steps.values())
+            if not all(np.all(np.isfinite(v)) for v in recorded) or ep.ending == "non-finite observation":
+                a["nonfinite"].append((case, ep.start_index))
+            strides = np.concatenate([np.diff(stances(ep, side)[0]) for side in SIDES])
+            speed = (ep.steps["pelvis_tx"][-1] - ep.steps["pelvis_tx"][0]) / max(ep.duration - ep.dt, ep.dt)
+            a["gait"].append(
+                dict(
+                    case=case,
+                    index=ep.start_index,
+                    duration=ep.duration,
+                    ending=ep.ending,
+                    speed=speed,
+                    stride=float(np.mean(strides)) if len(strides) else np.nan,
+                    plantarflexion=-np.degrees(min(ep.steps["ankle_angle_r"].min(), ep.steps["ankle_angle_l"].min())),
+                )
+            )
+    a["same_as_exo_off"] = max(
+        (
+            float(np.max(np.abs(off.steps[j] - on.steps[j]))) if len(off.steps[j]) == len(on.steps[j]) else np.inf
+            for off, on in zip(results[EXO_OFF], results[VNMC_SHADOW])
+            for j in STEP_JOINTS
+        ),
+        default=np.nan,
+    )
+    return a
+
+
+def plot_vnmc(results: dict[str, list[Episode]], analysis: dict, params, model, path: pathlib.Path) -> None:
+    """Per leg, the torque over the true stride: what the VNMC would command on the unassisted gait (shadow) and what
+    it delivers assisting; and 3 s of the right leg assisting: command, raw muscle torque, state and ankle angle."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(figsize=(11, 9), layout="constrained")
+    grid = fig.add_gridspec(4, 2, height_ratios=[1.3, 1.0, 0.45, 0.8])
+    for col, side in enumerate(SIDES):
+        ax = fig.add_subplot(grid[0, col])
+        for case, color in ((VNMC_SHADOW, REFERENCE), (VNMC_ASSIST, DELIVERED)):
+            rows = np.array(analysis["legs"][side]["cases"][case]["profiles"])
+            if not len(rows):
+                continue
+            phase = (np.arange(rows.shape[1]) + 0.5) / rows.shape[1]
+            mean, sd = np.nanmean(rows, axis=0), np.nanstd(rows, axis=0)
+            ax.fill_between(phase, mean - sd, mean + sd, color=color, alpha=0.18, linewidth=0)
+            label = "would command, unassisted gait" if case == VNMC_SHADOW else "delivered, assisting"
+            ax.plot(phase, mean, color=color, linewidth=2, label=f"{label} ({len(rows)} strides)")
+        ax.set(title=f"{'Right' if side == 'r' else 'Left'} ankle", xlabel="gait phase (contact to contact)")
+        ax.set_ylabel("plantarflexion torque (N·m)")
+        ax.set_xlim(0, 1)
+        ax.legend(loc="upper right", frameon=False, fontsize=8)
+    eps = results[VNMC_ASSIST]
+    if eps:
+        ep = max(eps, key=lambda e: e.duration)
+        s = ep.substeps
+        t0 = s["t"][0] + min(4.0, max(ep.duration - 3.0, 0.0))
+        window = (s["t"] >= t0) & (s["t"] <= t0 + 3.0)
+        ax = fig.add_subplot(grid[1, :])
+        ax.plot(s["t"][window], s["vnmc_torque_r"][window], color=REFERENCE, linewidth=1.5, label="raw muscle torque")
+        ax.step(s["t"][window], s["cmd_r"][window], where="post", color=DELIVERED, linewidth=2, label="command (applied)")
+        ax.set(title=f"Right ankle, 3 s of episode {ep.start_index}", ylabel="torque (N·m)")
+        ax.legend(loc="upper right", frameon=False, fontsize=8)
+        ax2 = fig.add_subplot(grid[2, :], sharex=ax)
+        ax2.step(s["t"][window], s["control_state_r"][window], where="post", color=INK, linewidth=1.5)
+        ax2.set(ylabel="state", yticks=[1, 2, 3, 4], yticklabels=["reel-out", "swing", "reel-in", "stance"])
+        ax3 = fig.add_subplot(grid[3, :], sharex=ax)
+        ax3.plot(s["t"][window], s["ankle_angle_deg_r"][window], color=INK, linewidth=1.5)
+        ax3.set(ylabel="ankle angle, the boot's\n(deg, plantarflexion +)", xlabel="time (s)")
+    for ax in fig.axes:
+        ax.grid(color="#e6e5e0", linewidth=0.8)
+        ax.set_axisbelow(True)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def report_vnmc(analysis: dict, *, policy, config_path, sweep: list[tuple[int, float]], kept: list[int], rate_hz: float) -> str:
+    legs = analysis["legs"]
+
+    def cell(case, key, scale=1.0, digits=2, unit=""):
+        return " | ".join(_fmt(legs[s]["cases"][case][key], scale, digits, unit) for s in SIDES)
+
+    lines = [
+        "# VNMC rollouts",
+        "",
+        f"Policy `{policy}`, config `{config_path}`, {datetime.date.today().isoformat()}.",
+        "",
+        f"{len(sweep)} start indices tried with the exo off; {len(kept)} walked long enough and were run in every case: "
+        + ", ".join(f"{i} ({d:.1f} s)" for i, d in sweep if i in kept)
+        + ".",
+        "",
+        "## Pass bar",
+        "",
+        "| check | right | left | |",
+        "|---|---|---|---|",
+        f"| no NaN or crash | | | {_pass(not analysis['nonfinite'])} |",
+    ]
+
+    def row(name, fmt, ok):
+        cells = [fmt(legs[side]) for side in SIDES]
+        lines.append(f"| {name} | {cells[0]} | {cells[1]} | {_pass(all(ok(legs[side]) for side in SIDES))} |")
+
+    row(
+        f"sensing: every stance (a contact of {MIN_STANCE * 1e3:.0f} ms or more) a strike, dated within a tick",
+        lambda leg: (
+            f"{len(leg['delays'])} of {len(leg['delays']) + leg['missed']}; delay {_fmt(leg['delays'], 1e3, unit=' ms')}"
+        ),
+        lambda leg: leg["missed"] == 0 and len(leg["delays"]) > 0,
+    )
+    row(
+        "sensing: no other strike, such as a scuff in swing",
+        lambda leg: f"{leg['false']} ({leg['touches']} shorter touches)",
+        lambda leg: leg["false"] == 0,
+    )
+    same = analysis["same_as_exo_off"]
+    lines.append(f"| shadow gait identical to exo off | max difference {same:.1e} | | {_pass(same == 0)} |")
+    row(
+        "applied torque = command",
+        lambda leg: f"max error {leg['cases'][VNMC_ASSIST]['applied_error']:.1e} N·m",
+        lambda leg: leg["cases"][VNMC_ASSIST]["applied_error"] < 1e-6,
+    )
+    row(
+        "torque held between ticks",
+        lambda leg: f"{leg['cases'][VNMC_ASSIST]['off_tick']} changes off a tick",
+        lambda leg: leg["cases"][VNMC_ASSIST]["off_tick"] == 0,
+    )
+    lines += [
+        "",
+        "## Stances and torque",
+        "",
+        "Per stance (control state 4) or per stride between foot-contact onsets. A stance that ran through swing is one "
+        "with a contact onset inside it: its raw muscle torque never passed 5 N·m, or never rose again below 80% of its "
+        "peak, so its toe-off fired late.",
+        "",
+        "| | shadow: right | shadow: left | assisting: right | assisting: left |",
+        "|---|---|---|---|---|",
+    ]
+
+    def both(key, scale=1.0, digits=2, unit=""):
+        return f"{cell(VNMC_SHADOW, key, scale, digits, unit)} | {cell(VNMC_ASSIST, key, scale, digits, unit)}"
+
+    lines += [
+        f"| stance duration (s) | {both('duration')} |",
+        f"| stance ends at phase (of its true stride) | {both('end_phase', digits=3)} |",
+        "| stances through swing | "
+        + " | ".join(
+            f"{int(np.sum(np.array(legs[s]['cases'][c]['through']) > 0))} of {len(legs[s]['cases'][c]['through'])}"
+            for c in (VNMC_SHADOW, VNMC_ASSIST)
+            for s in SIDES
+        )
+        + " |",
+        "| longest stance_time (s) | "
+        + " | ".join(f"{legs[s]['cases'][c]['max_stance_time']:.2f}" for c in (VNMC_SHADOW, VNMC_ASSIST) for s in SIDES)
+        + " |",
+        f"| raw muscle peak per stance (N·m) | {both('raw_peak', digits=1)} |",
+        f"| command peak per stance (N·m) | {both('peak', digits=1)} |",
+        f"| impulse per stride (N·m·s) | {both('impulse')} |",
+        "| share of time in reel-out / swing / reel-in / stance | "
+        + " | ".join(
+            " / ".join(f"{100 * legs[s]['cases'][c]['share'][k]:.0f}%" for k in (1, 2, 3, 4))
+            for c in (VNMC_SHADOW, VNMC_ASSIST)
+            for s in SIDES
+        )
+        + " |",
+        "",
+        "## The muscle's ranges against the boot's",
+        "",
+        "p1 to p99 over every substep from the first stance on, against the same leg's in the VNMC sessions' logs (every "
+        "row while walking). The muscle follows the absolute ankle angle (the boot's, through each side's standing "
+        "angle), so where the policy's ankle range differs from the participant's the muscle works elsewhere.",
+        "",
+        "| | right: logs | right: shadow | right: assisting | left: logs | left: shadow | left: assisting |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for key in VNMC_RANGE_KEYS:
+        cells = []
+        for s in SIDES:
+            cells.append("{:.3g} to {:.3g}".format(*VNMC_LOG_RANGES[s][key]))
+            cells += ["{:.3g} to {:.3g}".format(*legs[s]["cases"][c]["ranges"][key]) for c in (VNMC_SHADOW, VNMC_ASSIST)]
+        lines.append(f"| {key} | " + " | ".join(cells) + " |")
+    lines += [
+        "",
+        "## Gait",
+        "",
+        "Reported, not required: the policy was not trained with this assistance.",
+        "",
+        "| case | start index | duration (s) | ending | speed (m/s) | stride (s) | peak plantarflexion (°) |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for g in analysis["gait"]:
+        lines.append(
+            f"| {g['case']} | {g['index']} | {g['duration']:.1f} | {g['ending']} | {g['speed']:.2f} | {g['stride']:.2f} "
+            f"| {g['plantarflexion']:.1f} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 # --- the controllers' suites ----------------------------------------------------------------------------------------
 
 
@@ -693,6 +1029,17 @@ SUITES = {
         analyze=analyze,
         plot=plot,
         report=report,
+    ),
+    "VNMC": Suite(
+        config=VNMC_CONFIG,
+        cases={
+            VNMC_SHADOW: dict(device_controller="exoboot_vnmc", shadow_mode=True),
+            VNMC_ASSIST: dict(device_controller="exoboot_vnmc"),
+        },
+        analyze=analyze_vnmc,
+        plot=plot_vnmc,
+        report=report_vnmc,
+        extra_keys=VNMC_EXTRA_KEYS,
     ),
 }
 # Every case by name, the exo-off one first.

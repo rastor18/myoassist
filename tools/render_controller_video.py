@@ -164,9 +164,74 @@ class StrideAveragePanel:
             )
 
 
+class VNMCMusclePanel:
+    """The VNMC's panel, per leg: its muscle now. Bars for the stimulation, the force and the contractile length (each
+    on its own scale, as the boot logs them), and the raw muscle torque against this stance's peak, the 80% of it the
+    toe-off must fall below, and the previous stance's peak (the one the command is scaled to)."""
+
+    states = (REEL_OUT, SWING, REEL_IN, STANCE)
+    SCALES = {"stimulation": ("m_stim", 0.5), "force / F_max": ("mtu_force", 0.3), "l_ce / l_opt": ("length_ce", 1.2)}
+    TORQUE_SCALE = 50.0  # N*m of raw muscle torque across the panel
+
+    @staticmethod
+    def phase_levels(params) -> list[tuple[float, str, str]]:
+        return []  # the VNMC's gates are in its torque, not in the phase
+
+    def __init__(self, axes: dict, params, col: dict[str, int]):
+        self.p, self.col = params, col
+        self.rows_y = {"raw torque": 0, **{name: 3 - k for k, name in enumerate(self.SCALES)}}
+        self.est = {}
+        for side, name in (("r", "Right"), ("l", "Left")):
+            ax = axes[side]
+            bars = ax.barh(list(self.rows_y.values()), [0] * 4, height=0.6, color=[INK, COLOR[side], COLOR[side], MUTED])
+            ax.set_yticks(list(self.rows_y.values()))
+            ax.set_yticklabels(list(self.rows_y), fontsize=8)
+            ax.set_xlim(0, 1.3)
+            ax.set_ylim(-1.4, 3.6)
+            ax.set_xticks([])
+            ax.set_title(f"{name} leg: the VNMC's muscle", fontsize=9, loc="left")
+            marks = {key: ax.plot([], [], color=c, lw=2)[0] for key, c in (("peak", INK), ("80%", "#eda100"), ("last", MUTED))}
+            values = [ax.text(0, y, "", fontsize=7.5, va="center", ha="left", color=INK) for y in self.rows_y.values()]
+            note = ax.text(0.0, -1.15, "", fontsize=8, color=INK)
+            self.est[side] = (bars, marks, values, note)
+
+    def update(self, side: str, rows: np.ndarray, now: float) -> None:
+        col = self.col
+        bars, marks, values, note = self.est[side]
+        last = rows[-1]
+        if f"vnmc_torque_{side}" not in col or not np.isfinite(last[col[f"control_state_{side}"]]):
+            note.set_text("no controller")
+            return
+        state = int(last[col[f"control_state_{side}"]])
+        torque = last[col[f"vnmc_torque_{side}"]]
+        widths = [min(torque / self.TORQUE_SCALE, 1.25)]
+        texts = [f"{torque:.1f} N·m"]
+        for key, scale in self.SCALES.values():
+            widths.append(min(last[col[f"{key}_{side}"]] / scale, 1.25))
+            texts.append(f"{last[col[f'{key}_{side}']]:.3f}")
+        for bar, width, text, value, y in zip(bars, widths, texts, values, self.rows_y.values()):
+            bar.set_width(width)
+            value.set_position((width + 0.02, y))
+            value.set_text(text)
+        bars[0].set_color(STATES[state][1])
+        # This stance's peak so far, from the record: the samples since it began.
+        in_stance = rows[:, col[f"control_state_{side}"]] == STANCE
+        began = len(in_stance) - np.argmax(~in_stance[::-1]) if not in_stance.all() else 0
+        peak = float(rows[began:, col[f"vnmc_torque_{side}"]].max()) if state == STANCE else np.nan
+        scalefactor = last[col[f"scalefactor_{side}"]]
+        previous = self.p.peak_torque / (0.8 * scalefactor) if scalefactor > 0 else np.nan  # the scaling's reference
+        for key, x in (("peak", peak), ("80%", 0.8 * peak), ("last", previous)):
+            x = x / self.TORQUE_SCALE if np.isfinite(x) else np.nan
+            marks[key].set_data([x, x], [-0.4, 0.4])
+        note.set_text(
+            f"{STATES[state][0]}"
+            + (f" for {last[col[f'stance_time_{side}']]:.2f} s; scaled x{scalefactor:.2f}" if state == STANCE else "")
+        )
+
+
 # Each device controller's right-hand panel, by its device_controller name; any other gets NoControllerPanel. A panel
 # gets the axes per side, the controller's params and the record's columns by field name, and is updated every frame.
-PANELS = {"exoboot_spline": StrideAveragePanel}
+PANELS = {"exoboot_spline": StrideAveragePanel, "exoboot_vnmc": VNMCMusclePanel}
 
 
 class Strip:

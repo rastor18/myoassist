@@ -58,6 +58,26 @@ def test_the_strip_draws_with_each_controllers_panel(controller):
     assert frame.shape[1] == WIDTH and frame.shape[2] == 3 and frame.std() > 0
 
 
+def test_the_strip_draws_with_the_vnmcs_panel():
+    """The VNMC's panel reads its muscle from the record's extra fields, in every state including stance."""
+    from tools.render_controller_video import PANELS, WIDTH, Recorder, Strip
+    from tools.rollout_controllers import VNMC_EXTRA_KEYS
+
+    fields = Recorder.FIELDS + tuple(f"{key}_{side}" for key in VNMC_EXTRA_KEYS for side in ("r", "l"))
+    rows = _rows(fields)
+    col = {name: i for i, name in enumerate(fields)}
+    for side in ("r", "l"):
+        stance = rows[:, col[f"control_state_{side}"]] == 4.0
+        rows[:, col[f"vnmc_torque_{side}"]] = np.where(stance, 20.0, 2.0)
+        rows[:, col[f"scalefactor_{side}"]] = 1.2
+        for key, value in (("m_stim", 0.2), ("mtu_force", 0.1), ("length_ce", 0.9), ("stance_time", 0.1)):
+            rows[:, col[f"{key}_{side}"]] = value
+    strip = Strip(PARAMS, "VNMC", PANELS["exoboot_vnmc"], fields)
+    for now in (3.0, 3.6):  # in swing, in stance
+        frame = strip.draw(rows[rows[:, 0] <= now], now=now, start=0)
+        assert frame.shape[1] == WIDTH and frame.std() > 0
+
+
 def test_the_panel_shows_the_strides_the_estimate_averages():
     from tools.render_controller_video import stride_panel
 

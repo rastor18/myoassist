@@ -214,6 +214,37 @@ def test_every_case_belongs_to_one_suite_after_the_shared_exo_off_case():
         assert all(suite_of(case) is suite and CASES[case] is suite.cases[case] for case in suite.cases)
 
 
+def test_vnmc_stances_are_timed_counted_through_swing_and_placed_on_the_true_stride():
+    """A stance that holds through the next contact onset is one that ran through swing; each stance's end is placed on
+    the stride it started in."""
+    from tools.rollout_controllers import runs_of, vnmc_stance_table
+
+    t = np.arange(0.0, 6.0, 1 / RATE)
+    onsets = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    state = np.full(len(t), 2.0)
+    state[(t >= 1.15) & (t < 1.75)] = 4.0  # an ordinary stance, ending at phase 0.75
+    state[(t >= 2.15) & (t < 3.40)] = 4.0  # one that ran through swing, past the strike at 3.0
+    state[t >= 5.15] = 4.0  # cut off by the end of the record: not complete
+    runs = runs_of(t, state, 4.0)
+    assert len(runs) == 3 and np.isnan(runs[-1][1])
+    table = vnmc_stance_table(t, state, onsets)
+    np.testing.assert_allclose(table["duration"], [0.6, 1.25], atol=1 / RATE)
+    assert table["through"].tolist() == [0, 1]
+    np.testing.assert_allclose(table["end_phase"], [0.75, 1.40], atol=1 / RATE)
+
+
+def test_the_vnmc_suite_runs_the_shadow_first_and_records_the_vnmcs_diagnostics():
+    from myoassist_utils.exo_ctrl.vnmc import VNMC_DIAGNOSTICS
+    from tools.rollout_controllers import SUITES, VNMC_LOG_RANGES, VNMC_RANGE_KEYS
+
+    suite = SUITES["VNMC"]
+    assert list(suite.cases) == ["VNMC shadow", "VNMC"]
+    assert suite.cases["VNMC shadow"] == dict(device_controller="exoboot_vnmc", shadow_mode=True)
+    assert set(VNMC_DIAGNOSTICS) | {"torque_nm"} == set(suite.extra_keys)
+    for side in ("r", "l"):
+        assert set(VNMC_LOG_RANGES[side]) == set(VNMC_RANGE_KEYS)
+
+
 @pytest.fixture(scope="module")
 def env():
     from tools.rollout_controllers import CASES, DEFAULT_CONFIG, make_env
