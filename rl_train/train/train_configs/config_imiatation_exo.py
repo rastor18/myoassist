@@ -136,6 +136,12 @@ class ExoImitationTrainSessionConfig(ImitationTrainSessionConfig):
             # and 1/8192 g and 1/32.75 deg/s on a simulated IMU.
             sensor_quantize: bool = True
 
+            # The ExoBoot VNMC (device_controller "exoboot_vnmc", myoassist_utils/exo_ctrl/vnmc.py): the gain of its
+            # muscle's positive force feedback, stimulation = 0.01 + vnmc_gain x F_mtu / F_max in stance (the boot's
+            # VNMC_GAIN). It also reads peak_torque (each stance is scaled so the previous one's peak would reach it,
+            # and clipped there), reel_in_time, reel_out_time (0.2 s on the boot: a fixed timer) and the standing angles.
+            vnmc_gain: float = 1.468
+
         exo_controller_params: ExoControllerParams = field(default_factory=ExoControllerParams)
 
         # The scripted controller that drives the exo from inside the physics loop, on every physics substep: ""

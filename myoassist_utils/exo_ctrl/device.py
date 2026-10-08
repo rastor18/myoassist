@@ -18,6 +18,7 @@ import mujoco
 from myoassist_utils.exo_ctrl.factory import LegExo, build_leg_exos
 from myoassist_utils.exo_ctrl.schedule import TickSchedule
 from myoassist_utils.exo_ctrl.torque_adapter import PLANTARFLEXION_SIGN
+from myoassist_utils.exo_ctrl.vnmc import build_vnmc_device
 
 
 class ZeroTorqueDevice:
@@ -145,6 +146,7 @@ def _build_spline(params, model: mujoco.MjModel, *, physics_rate_hz: float) -> F
 DEVICE_BUILDERS: dict[str, Callable[..., object]] = {
     "zero": _build_zero,
     "exoboot_spline": _build_spline,
+    "exoboot_vnmc": build_vnmc_device,
 }
 DEVICE_CONTROLLERS = tuple(DEVICE_BUILDERS)
 
