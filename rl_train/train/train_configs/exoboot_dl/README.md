@@ -177,6 +177,13 @@ boot's, not less, so smoothed motion is not the cause (it was the suspect from t
 works as recovered on the boot's own inputs (above), so this is the policy's gait seen through the simulated sensors:
 out of what the network was trained on.
 
+The yardstick is fair. On the validation sessions' instrumented treadmill, with the same definitions (contact on at
+100 N, off at 25 N, after 50 ms unloaded), the boot's own network calls heel strike 5–10 ms before contact and toe-off
+4–7 ms before it ends, its stance phase is within RMSE 0.024–0.029 of the linear contact phase, and is_stance agrees with
+contact on 98% of rows (~370 clean stances per leg and session). The treadmill and the boot share no clock; they were
+aligned by the shank's impact spike, to about ±10–15 ms. So the network is right on a person and wrong in the sim, and
+the difference is in the sim's inputs (the simulated sensors, the policy's gait, its foot contact), not the network.
+
 Assisting, the delivered torque has the boot's peak (25 N·m) and, on the right, its shape on the true gait cycle (r
 0.98 against the boot's stance command; peak at 0.565–0.575 of the stride against the boot's 0.585); on the left it
 peaks early, at 0.48 (r 0.62–0.76). Reel-in lasts 160 ms and reel-out 177 ms (the configured 157 and 172, rounded up to
@@ -196,8 +203,10 @@ python tools/render_controller_video.py <train_session_...>/trained_models/<mode
 
 * **The network fails decision gate 2 in the dynamic sim** (above): stance phase RMSE 0.08–0.12 against the gate's 0.03,
   heel strikes 70–105 ms early, with or without the out-of-plane filter. Training with this controller would assist
-  on a phase that leads the true one by ~0.1. A 3D leg model, whose out-of-plane motion is physical, is the
-  alternative; it is not decided.
+  on a phase that leads the true one by ~0.1. Against real contact on the boot it passes (above), so the cause is the
+  sim's inputs. **The DL port is parked here.** The next step, when it resumes, is to average each of the 8 input
+  channels around contact in the sim and on the boot and find which shows the stance signature early; that says
+  whether a sensor detail can fix it or a 3D leg model is needed.
 * **Assistance comes on 1.0 s into each episode,** before the network's 200-sample window has filled (1.14 s): the speed
   head's first replies, low-passed, cross 0.7 m/s on the way up. The boot started its sessions standing, with the
   criterion off.
