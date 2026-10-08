@@ -82,6 +82,8 @@ disagree, the port follows the logs (the scaling, below).
   standing at the start of the VNMC sessions (mean of both sessions). The muscle's working point is the absolute
   angle, so these matter more here than for the DL task.
 * **In the physics loop at 150 Hz** (`controller_rate_hz`): every 8th substep, its torque held in between, as for 4PTS.
+  A step costs 1.21x a stock step (4PTS: 1.18x; the in-loop seam alone: 1.16x), single env, pinned to one core
+  (`tools/bench_device_step.py --cpu 3`).
 * **It reports its state as the boot logs it.** Each leg's `diagnostics()` gives the common keys (`torque_nm`, `phase`,
   `phase_valid`, `in_stance`, `heel_strike`, `strike_time`, `control_state` in the boot's codes 1 reel-out, 2 swing, 3
   reel-in, 4 stance, `stride_estimate`) and the VNMC's own: `mtu_force`, `length_ce`, `velocity_ce` (normalized, as the
