@@ -185,36 +185,44 @@ which walks on `DephyExoBoot_L1` with the exo off for 32–33 s at 1.10–1.12 m
 |---|---|
 | strikes (shadow) | every stance a strike (182 of 182 right, 178 of 178 left), dated +2.9 to +3.1 ± 1.8–1.9 ms after the contact began; no other strike (the right foot's 13 toe scuffs ignored) |
 | shadow | the gait is the exo-off gait, bit for bit |
-| what it would do (shadow) | stance 0.44–0.46 ± 0.02 s, ending at phase 0.60–0.62 ± 0.01 of the true stride; none ran through swing (0 of 330); raw muscle peak 32–35 N·m, command peak 23–24 N·m, 5.0 N·m·s per stride |
+| what it would do (shadow) | stance from phase 0.15 (reel-in after the foot lands) for 0.50–0.52 ± 0.02 s, ending at phase 0.60–0.62 ± 0.01 of the true stride; none ran through swing (0 of 330); raw muscle peak 38–42 N·m, command peak 23 N·m, 5.4–5.5 N·m·s per stride |
 | applied torque | equals the command (to 2×10⁻¹⁵ N·m), changing only on the 150 Hz ticks |
-| assisting | stance 0.40–0.44 ± 0.05 s, ending at phase 0.62–0.65 ± 0.05–0.08; none ran through swing (0 of 46); raw peak 27 N·m, command peak 16–19 N·m |
+| assisting | stance 0.45–0.52 ± 0.05 s, ending at phase 0.59–0.66 ± 0.04–0.06; none ran through swing (0 of 61); raw peak 32–34 N·m, command peak 18–21 N·m |
 
-The VNMC's command over the stride is the boot's shape: a reflex build-up from heel strike to a peak at 45–50% of the
-stride, then the toe-off's drop at 60–62%.
+**The command's shape is not the boot's,** and that is the policy's gait, not the port. Per stride (the boot's two
+sessions against the sim's shadow runs), stance starts at the same phase (0.13–0.15 on the boot, 0.15 here), and the
+muscle's force, stimulation and raw torque follow the boot's through the first third of the stride. Then they part:
+the boot's command ramps steadily to a peak at 0.51–0.53 of the stride and its stance ends at 0.67; the sim's rises
+late and steeply to a narrower peak at 0.43–0.47, and its stance ends at 0.60–0.62. The muscle's length follows the
+ankle angle, and its positive force feedback grows whenever the ankle dorsiflexes and stretches it. The participant's
+ankle stays about level through mid-stance and pushes off from 0.6 of the stride; the policy's dorsiflexes 13–20° more
+through mid-stance and pushes off about 0.1 of the stride earlier. A constant offset is not the cause: read 7° more
+plantarflexed, the sim's ankle gives the same command (the per-stance scaling absorbs the force level). A policy
+trained with the VNMC walks differently, so its shape should move, but that has not been tested.
 
 **The muscle works off the participant's range.** Through the standing angles, the policy's ankle reads as the boot's
 would, and over its walking it spans −21 to +12° (right) and −29 to +8° (left), p1 to p99, against −7 to +21° and −12 to
-+15° on the boot: 13–17° more dorsiflexed. The muscle's force and torque still land in the boot's range (force up to
-0.20 and 0.23 of F_max against 0.15 and 0.22; raw torque up to 32 and 37 N·m against 24 and 35), and the per-stance
-scaling normalizes the command to `peak_torque` either way, but the contractile element sits longer (0.74–1.05 l_opt
-against 0.68–1.03), so the toe-off and the shape follow this gait, not the participant's.
++15° on the boot: 13–17° more dorsiflexed. The muscle's force and torque run higher than on the boot (force up to
+0.25 and 0.28 of F_max against 0.15 and 0.22; raw torque up to 40 and 45 N·m against 24 and 35), which the per-stance
+scaling normalizes to `peak_torque`, and the contractile element sits longer (0.72–1.05 l_opt against 0.68–1.03), so
+the toe-off and the shape follow this gait, not the participant's.
 
 **Gait survival (reported, not required).** With the VNMC's torque, which the policy was never trained with, it drifts
-off the reference motion (the imitation env's 0.6 rad termination) after 5.7–7.0 s from all 6 start points (one fall),
-at 1.10–1.16 m/s with strides shortening to 0.95–1.08 s; 4PTS lasted 5–14 s on the same policy. Most of those endings
+off the reference motion (the imitation env's 0.6 rad termination) after 5.5–11.9 s from all 6 start points (one
+fall), at 1.09–1.15 m/s with strides shortening to 0.99–1.08 s; 4PTS lasted 5–14 s on the same policy. Most of those endings
 are the imitation env's drift stop, not falls, and the torque is what the policy cannot take. From the same 6 start
 points, with the policy unchanged:
 
 | `peak_torque` | with the drift stop | without it (a fall or the 33.3 s limit ends it) |
 |---|---|---|
 | 0 (exo off) | 32.3–33.3 s | 33.3 s, all 6 |
-| 10 N·m | 8.4–21.3 s, all off the reference | 33.3 s, all 6 |
-| 15 N·m | 7.9–20.5 s, all off the reference | 33.3 s, all 6 |
-| 25 N·m | 5.7–7.0 s (one fall) | 5.9–7.1 s, all falls |
+| 10 N·m | 8.4–20.5 s, all off the reference | 33.3 s, all 6 |
+| 15 N·m | 8.3–20.5 s, all off the reference | 33.3 s at 5 of 6; one fall at 14.5 s |
+| 25 N·m | 5.5–11.9 s (one fall) | 5.6–12.3 s, all falls |
 
-So for evaluating the VNMC on a policy trained without it, 10–15 N·m with the drift stop off
+So for evaluating the VNMC on a policy trained without it, 10 N·m with the drift stop off
 (`env._out_of_trajectory_threshold = inf`, as `tools/render_controller_video.py` sets it) keeps it walking the whole
-episode at 1.08–1.11 m/s. A policy trained with the VNMC should take 25 N·m, but that has not been tested.
+episode at 1.10–1.11 m/s, and 15 N·m nearly always does. A policy trained with the VNMC should take 25 N·m, but that has not been tested.
 
 To see it, `tools/render_controller_video.py --case VNMC` renders an episode with, per leg, the VNMC's muscle: its
 stimulation, force and length, and its raw torque against this stance's peak, the 80% the toe-off must fall below,

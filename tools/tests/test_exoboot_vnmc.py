@@ -315,6 +315,32 @@ def test_the_state_path_and_the_toe_off_one_tick_late():
     assert rows[toe_off + 1][3]["stance_time"] == 0.0
 
 
+def test_reel_in_runs_from_the_foot_landing_not_from_the_debounced_report():
+    """With the contact-force detector's 50 ms debounce, the strike is reported 50 ms after the foot lands; stance still
+    starts reel_in_time after the landing, as on the boot, whose detector fires on the strike itself."""
+    from myoassist_utils.exo_ctrl import VgrfHeelStrikeDetector
+
+    leg = VNMCLeg(
+        stance=VNMCStance(muscle=ScriptedMuscle([]), gain=1.468, peak_torque=25.0),
+        heel_strike_detector=VgrfHeelStrikeDetector(grf_on=100.0, grf_off=25.0, min_unload_time=0.05, min_contact_time=0.05),
+        phase_estimator=StrideAverageGaitPhaseEstimator(),
+        state_machine=BootStateMachine(reel_in_time=0.15, reel_out_time=0.2),
+    )
+    landings = np.array([0.5, 1.6, 2.7])
+    ticks = np.arange(0.0, 3.3, 1 / RATE)
+    states = []
+    for t in ticks:
+        k = np.searchsorted(landings, t, side="right") - 1
+        loaded = k >= 0 and t - landings[k] < 0.6
+        leg.step(float(t), (400.0 if loaded else 0.0, -3.0))
+        states.append(leg.state_machine.state)
+    states = np.array(states)
+    landed = ticks[np.searchsorted(ticks, 2.7)]  # the first tick the foot is loaded
+    assert ticks[np.argmax(states == REEL_IN)] == pytest.approx(landed + 0.05, abs=1 / RATE), "reported after 50 ms"
+    first_stance = ticks[np.argmax(states == STANCE)]
+    assert 0.15 < first_stance - landed <= 0.15 + 1 / RATE, f"stance {first_stance - landed:.4f} s after the landing"
+
+
 def test_a_stance_under_5_n_m_lasts_through_swing_and_the_next_strike():
     """Nothing but the VNMC's toe-off ends its stance: not the next heel strike, not a lost gait phase."""
     leg, muscle = _leg([])

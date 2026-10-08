@@ -53,6 +53,17 @@ def test_a_lost_phase_ends_stance_and_swing_only_overrides_everything():
     assert m.step(0.7, **{**base, "swing_only": True, "did_heel_strike": True}) == SWING
 
 
+def test_reel_in_is_timed_from_a_strike_confirmed_after_the_fact():
+    """A debounced detector reports a strike late, with when it happened: reel-in lasts reel_in_time from then."""
+    m = _machine()
+    base = dict(did_heel_strike=False, did_toe_off=False, gait_phase=0.1, swing_only=False)
+    m.step(0.0, **base)
+    m.step(0.2, **base)
+    assert m.step(0.65, **{**base, "did_heel_strike": True, "strike_time": 0.6}) == REEL_IN
+    assert m.step(0.75, **base) == REEL_IN
+    assert m.step(0.751, **base) == STANCE, "0.15 s after the strike at 0.6, not after its report at 0.65"
+
+
 def test_reset_starts_the_machine_over():
     m = _machine()
     base = dict(did_heel_strike=False, did_toe_off=False, gait_phase=0.1, swing_only=False)

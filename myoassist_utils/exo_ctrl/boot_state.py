@@ -32,7 +32,9 @@ class BootStateMachine:
     """``StanceSwingReeloutReelinStateMachine.step`` for a stance controller, on sim time.
 
     Reel-in and reel-out end when their ``DelayTimer`` runs out (strictly after the duration), as the boot's do when
-    the slack test does not end them first.
+    the slack test does not end them first. The boot starts reel-in on the tick its heel-strike detector fires, which is
+    the strike. A detector that confirms a strike after the fact (``VgrfHeelStrikeDetector.min_contact_time``) passes
+    ``strike_time``, when the strike happened, and reel-in is timed from then.
     """
 
     def __init__(self, *, reel_in_time: float, reel_out_time: float):
@@ -50,7 +52,16 @@ class BootStateMachine:
         self._reel_in.reset()
         self._reel_out.reset()
 
-    def step(self, t: float, *, did_heel_strike: bool, did_toe_off: bool, gait_phase: float | None, swing_only: bool) -> int:
+    def step(
+        self,
+        t: float,
+        *,
+        did_heel_strike: bool,
+        did_toe_off: bool,
+        gait_phase: float | None,
+        swing_only: bool,
+        strike_time: float | None = None,
+    ) -> int:
         if self.state == STANCE and (did_toe_off or gait_phase is None):
             self._toe_off_switch = True
         if self._just_starting:
@@ -61,7 +72,7 @@ class BootStateMachine:
             self.state = SWING
         elif self.state == SWING and did_heel_strike and gait_phase is not None:
             self.state = REEL_IN
-            self._reel_in.start(t)
+            self._reel_in.start(t if strike_time is None else min(t, strike_time))
         elif self.state == REEL_IN and self._reel_in.check(t):
             self._reel_in.reset()
             self.state = STANCE

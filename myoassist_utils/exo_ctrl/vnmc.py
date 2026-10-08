@@ -334,6 +334,9 @@ class VNMCLeg:
             did_toe_off=self._toe_off_pending,
             gait_phase=shown_phase,
             swing_only=self.swing_only,
+            # Reel-in from when the foot landed, not from when the debounced detector confirmed it (as 4PTS dates its
+            # stride): on the boot the gyro detector fires on the strike itself.
+            strike_time=detector.strike_time if self._did_heel_strike else None,
         )
         if state == STANCE:
             if was != STANCE:
