@@ -164,9 +164,67 @@ class StrideAveragePanel:
             )
 
 
+class NetworkPanel:
+    """The DL task's panel, per leg: the network's newest reply -- is_stance, the stance phase (gait phase is 0.6 x it)
+    and the speed, low-passed, against the speed activation's on and off thresholds -- and whether assistance is on."""
+
+    states = (REEL_OUT, SWING, REEL_IN, STANCE)
+    ROWS = {"is_stance": 2, "stance phase": 1, "speed (m/s)": 0}
+
+    @staticmethod
+    def phase_levels(params) -> list[tuple[float, str, str]]:
+        return [
+            (params.rise_fraction, "rise", "center"),
+            (params.peak_fraction, "peak", "top"),
+            (0.6, "stance end (0.6 x 1)", "bottom"),
+        ]
+
+    def __init__(self, axes: dict, params, col: dict[str, int]):
+        self.p, self.col = params, col
+        self.parts = {}
+        for side, name in (("r", "Right"), ("l", "Left")):
+            ax = axes[side]
+            bars = ax.barh(list(self.ROWS.values()), [0, 0, 0], height=0.62, color=[INK, COLOR[side], MUTED])
+            ax.set_yticks(list(self.ROWS.values()))
+            ax.set_yticklabels(list(self.ROWS), fontsize=8)
+            ax.set_xlim(0, 1.75)
+            ax.set_ylim(-1.25, 2.6)
+            ax.set_title(f"{name} leg: the network", fontsize=9, loc="left")
+            ax.tick_params(axis="x", labelsize=7)
+            for level, label in ((params.dl_speed_off, "off"), (params.dl_speed_on, "on")):
+                ax.plot([level, level], [-0.36, 0.36], color="#eda100", lw=2)
+                ax.text(level, -0.42, label, fontsize=6.5, ha="center", va="top")
+            values = [ax.text(0, y, "", fontsize=7.5, va="center", ha="left", color=INK) for y in self.ROWS.values()]
+            note = ax.text(0.0, -1.05, "", fontsize=8, color=INK)
+            self.parts[side] = (bars, values, note)
+
+    def update(self, side: str, rows: np.ndarray, now: float) -> None:
+        col = self.col
+        bars, values, note = self.parts[side]
+        last = rows[-1]
+        if f"is_stance_{side}" not in col or not np.isfinite(last[col[f"is_stance_{side}"]]):
+            note.set_text("no network reply recorded")
+            return
+        is_stance, head, speed = (last[col[f"{key}_{side}"]] for key in ("is_stance", "stance_phase_head", "speed"))
+        if is_stance < 0:
+            note.set_text("no reply yet")
+            return
+        widths = [float(is_stance), float(np.clip(head, 0.0, 1.0)), max(float(speed), 0.0)]
+        for bar, width in zip(bars, widths):
+            bar.set_width(width)
+        bars[0].set_color(STATES[STANCE][1] if is_stance == 1 else STATES[SWING][1])
+        for text, width, y, label in zip(values, widths, self.ROWS.values(), ("stance" if is_stance else "swing", None, None)):
+            text.set_position((width + 0.03, y))
+            text.set_text(label or f"{width:.2f}")
+        assist = last[col[f"assist_on_{side}"]] == 1
+        state = int(last[col[f"control_state_{side}"]])
+        note.set_text(f"assist {'on' if assist else 'off'}: {STATES[state][0]}")
+
+
 # Each device controller's right-hand panel, by its device_controller name; any other gets NoControllerPanel. A panel
 # gets the axes per side, the controller's params and the record's columns by field name, and is updated every frame.
 PANELS = {"exoboot_spline": StrideAveragePanel}
+PANELS["exoboot_dl"] = NetworkPanel
 
 
 class Strip:

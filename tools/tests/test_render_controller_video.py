@@ -58,6 +58,29 @@ def test_the_strip_draws_with_each_controllers_panel(controller):
     assert frame.shape[1] == WIDTH and frame.shape[2] == 3 and frame.std() > 0
 
 
+def test_the_strip_draws_with_the_networks_panel():
+    """The DL task's panel reads the network's reply from the extra keys the rollout tool's DL suite records."""
+    from tools.render_controller_video import PANELS, WIDTH, Recorder, Strip
+    from tools.rollout_controllers import SUITES
+
+    fields = Recorder.FIELDS + tuple(f"{key}_{side}" for key in SUITES["DL"].extra_keys for side in ("r", "l"))
+    params = types.SimpleNamespace(**vars(PARAMS), dl_speed_on=0.7, dl_speed_off=0.5)
+    strip = Strip(params, "DL", PANELS["exoboot_dl"], fields)
+    rows = _rows(fields)
+    col = {name: i for i, name in enumerate(fields)}
+    t = rows[:, col["t"]]
+    for side in ("r", "l"):
+        rows[:, col[f"is_stance_{side}"]] = (t % 1.1 < 0.66).astype(float)
+        rows[:, col[f"stance_phase_head_{side}"]] = np.where(t % 1.1 < 0.66, (t % 1.1) / 0.66, 0.0)
+        rows[:, col[f"speed_{side}"]] = 1.1
+        rows[:, col[f"assist_on_{side}"]] = (t > 2.2).astype(float)
+    for now in (0.5, float(t[-1])):  # assist off, then on
+        frame = strip.draw(rows[t <= now], now=now, start=0)
+        assert frame.shape[1] == WIDTH and frame.shape[2] == 3 and frame.std() > 0
+    note = strip.panel.parts["r"][2].get_text()
+    assert note.startswith("assist on"), note
+
+
 def test_the_panel_shows_the_strides_the_estimate_averages():
     from tools.render_controller_video import stride_panel
 

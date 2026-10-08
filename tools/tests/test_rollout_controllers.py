@@ -214,6 +214,156 @@ def test_every_case_belongs_to_one_suite_after_the_shared_exo_off_case():
         assert all(suite_of(case) is suite and CASES[case] is suite.cases[case] for case in suite.cases)
 
 
+# --- the DL suite ----------------------------------------------------------------------------------------------------
+
+
+def test_contact_stance_and_its_true_phase():
+    from tools.rollout_controllers import in_contact, true_stance_phase
+
+    t = np.arange(0.0, 3.0, 0.01)
+    onsets, ends = np.array([0.5, 2.0]), np.array([1.1, np.nan])  # the second still on at the end
+    on = in_contact(t, onsets, ends)
+    assert on[(t >= 0.5) & (t < 1.1)].all() and on[t >= 2.0].all() and not on[(t < 0.5) | ((t >= 1.11) & (t < 2.0))].any()
+    phase = true_stance_phase(t, onsets, ends)
+    np.testing.assert_allclose(phase[(t >= 0.5) & (t < 1.1)], (t[(t >= 0.5) & (t < 1.1)] - 0.5) / 0.6)
+    assert np.isnan(phase[t >= 2.0]).all(), "a contact that has not ended has no phase yet"
+
+
+def test_run_lengths_leave_out_the_runs_the_record_cuts():
+    from tools.rollout_controllers import run_lengths
+
+    t = np.arange(0.0, 1.0, 0.01)
+    on = (t >= 0.2) & (t < 0.5) | (t >= 0.55) & (t < 0.9)  # stance 0.3 s, a 0.05 s swing blip, stance 0.35 s
+    stance, swing = run_lengths(t, on)
+    np.testing.assert_allclose(stance, [0.3, 0.35])
+    np.testing.assert_allclose(swing, [0.05]), "the swing before 0.2 s and after 0.9 s is cut by the record"
+
+
+def test_nearest_offsets_match_either_side_and_count_missed_and_extra():
+    from tools.rollout_controllers import nearest_offsets
+
+    expected = np.array([1.0, 2.0, 3.0, 4.0])
+    found = np.array([0.99, 2.02, 3.5, 4.0, 4.05])  # 10 ms early, 20 ms late, too far, on time, and one extra
+    offsets, missed, extra = nearest_offsets(found, expected, 0.15)
+    np.testing.assert_allclose(offsets, [-0.01, 0.02, 0.0], atol=1e-12)
+    assert missed == 1 and sorted(extra.tolist()) == [3.5, 4.05]
+
+
+def test_band_rms_finds_a_sine_in_its_band():
+    from tools.rollout_controllers import band_rms
+
+    t = np.arange(0.0, 20.0, 1 / 175)
+    high, bands = band_rms(30.0 * np.sin(2 * np.pi * 2.0 * t) + 10.0 * np.sin(2 * np.pi * 8.0 * t) + 5.0, 175.0)
+    assert high == pytest.approx(10.0 / np.sqrt(2), rel=1e-3), "the 2 Hz part is below the bands"
+    assert bands[0] == pytest.approx(10.0 / np.sqrt(2), rel=1e-3) and max(bands[1:]) < 0.01
+
+
+def test_the_dl_expected_profile_is_the_spline_on_the_stance_phase():
+    from myoassist_utils.exo_ctrl import FourPointSpline
+    from tools.rollout_controllers import dl_expected_profile
+
+    params = types.SimpleNamespace(
+        rise_fraction=0.278, peak_fraction=0.543, fall_fraction=0.641, peak_torque=25.0, bias_torque=0.0,
+        peak_hold_time=0.0, reel_in_time=0.157,
+    )  # fmt: skip
+    spline = FourPointSpline(**{k: v for k, v in vars(params).items() if k != "reel_in_time"})
+    phase = np.array([0.1, 0.3, 0.55, 0.59, 0.61])
+    torque = dl_expected_profile(phase, params, stride=1.1, stance_fraction=0.6)
+    assert torque[0] == 0.0, "reel-in: 0.157 s of 1.1 s"
+    np.testing.assert_allclose(torque[1:4], [spline.torque(0.6 * p / 0.6) for p in phase[1:4]])
+    assert torque[4] == 0.0, "after toe-off"
+
+
+def _dl_episode(case, *, hs_offset=0.010, phase_bias=0.02, blip=False, seconds=12.0):
+    """A synthetic DL record: 1.1 s strides with 0.66 s contacts from 0.3 s, ticks at 175 Hz in 1200 Hz physics; the
+    network's is_stance is the contact ``hs_offset`` late, its stance phase the true one + ``phase_bias``; ``blip`` puts a
+    50 ms swing inside one stance."""
+    from myoassist_utils.exo_ctrl import TickSchedule
+    from tools.rollout_controllers import DL_EXTRA_KEYS, SIDES, Episode, Recorder
+
+    fields = Recorder.FIELDS + tuple(f"{key}_{side}" for key in DL_EXTRA_KEYS for side in SIDES)
+    t = np.arange(0.0, seconds, 1 / RATE)
+    schedule = TickSchedule(rate_hz=175.0, physics_rate_hz=RATE)
+    s = {name: np.zeros(len(t)) for name in fields}
+    s["t"], s["tick"] = t, np.array([schedule.tick() for _ in t], dtype=float)
+    since, late = (t - 0.3) % 1.1, (t - 0.3 - hs_offset) % 1.1
+    contact = (t >= 0.3) & (since < 0.66)
+    on = (t >= 0.3 + hs_offset) & (late < 0.66)
+    if blip:
+        on[(t >= 5.0) & (t < 5.05)] = False
+    for side in SIDES:
+        s[f"grf_{side}"] = np.where(contact, 800.0, 0.0)
+        s[f"is_stance_{side}"] = on.astype(float)
+        s[f"stance_phase_head_{side}"] = np.where(contact, since / 0.66 + phase_bias, 0.0)
+        s[f"speed_{side}"] = np.full(len(t), 1.05)
+        s[f"speed_head_{side}"] = np.full(len(t), 1.07)
+        s[f"assist_on_{side}"] = (t >= 3.0).astype(float)
+        s[f"gyro_z_{side}"] = 100.0 * np.sin(2 * np.pi * t / 1.1)
+        reel_in = (t >= 3.0) & on & (late < 0.157)
+        stance = (t >= 3.0) & on & (late >= 0.157)
+        s[f"control_state_{side}"] = np.where(reel_in, 3.0, np.where(stance, 4.0, 2.0))
+        held = np.maximum.accumulate(np.where(s["tick"] == 1, np.arange(len(t)), 0))  # the last tick's, between ticks
+        s[f"cmd_{side}"] = s[f"applied_{side}"] = np.where(stance, 10.0, 0.0)[held]
+    step_t = np.arange(1, int(seconds * 30) + 1) / 30
+    steps = {"t": step_t, "pelvis_tx": 1.1 * step_t, "pelvis_ty": np.full(len(step_t), 0.9)}
+    steps.update(ankle_angle_r=np.zeros(len(step_t)), ankle_angle_l=np.zeros(len(step_t)))
+    return Episode(case, 0, "time limit", 1 / 30, steps, s)
+
+
+def _dl_params():
+    return types.SimpleNamespace(
+        grf_on_newtons=100.0, grf_off_newtons=25.0, min_unload_time=0.05, min_stride_duration=0.6,
+        rise_fraction=0.278, peak_fraction=0.543, fall_fraction=0.641, peak_torque=25.0, bias_torque=0.0,
+        peak_hold_time=0.0, reel_in_time=0.157, dl_speed_on=0.7, dl_speed_off=0.5,
+    )  # fmt: skip
+
+
+def test_the_dl_analysis_measures_a_known_network():
+    from tools.rollout_controllers import DL_ASSIST, DL_SHADOW, EXO_OFF, analyze_dl, report_dl
+
+    results = {case: [_dl_episode(case)] for case in (EXO_OFF, DL_SHADOW, DL_ASSIST)}
+    a = analyze_dl(results, _dl_params(), None, 175.0)
+    tick = 1 / 175
+    for side in ("r", "l"):
+        leg = a["legs"][side]
+        # 0.02 but where clipping at 1 shortens it, over the last 2% of each stance
+        assert np.sqrt(np.mean(np.square(leg["phase_err"]))) == pytest.approx(0.02, abs=1e-3)
+        assert leg["missed_hs"] == leg["extra_hs"] == leg["missed_to"] == leg["extra_to"] == 0
+        assert np.all((np.array(leg["hs"]) >= 0.010 - 1e-9) & (np.array(leg["hs"]) <= 0.010 + tick + 1 / RATE + 1e-9))
+        assert leg["agreement"][0] == pytest.approx(1 - 2 * 0.010 / 1.1, abs=2 * tick / 1.1)
+        assert sum(leg["short_stance"]) == sum(leg["short_swing"]) == 0
+        assert leg["speed"] == [pytest.approx(1.05)] and leg["pelvis_speed"] == [pytest.approx(1.1)]
+        assert leg["assist_on_at"][0] == pytest.approx(3.0, abs=tick) and leg["assist_off"] == 0
+        assert leg["tick_gaps"] == {6, 7} and leg["off_tick"] == 0 and leg["applied_error"] == 0.0
+        assert np.mean(leg["reel_in"]) == pytest.approx(0.157, abs=2 / RATE)
+        assert leg["gyro_hi"][0] < 1.0, "a 0.9 Hz swing has nothing above 5 Hz"
+    assert a["same_as_exo_off"] == 0.0
+    text = report_dl(a, policy="p.zip", config_path="c.json", sweep=[(0, 12.0)], kept=[0], rate_hz=175.0)
+    assert "| stance phase vs the true one (RMSE, gate 0.03) | 0.020 | 0.020 | pass |" in text
+    assert "**FAIL**" not in text.split("## The network")[0]
+
+
+def test_the_dl_analysis_counts_a_flicker_that_splits_a_stride():
+    from tools.rollout_controllers import DL_SHADOW, EXO_OFF, analyze_dl, report_dl
+
+    results = {EXO_OFF: [_dl_episode(EXO_OFF)], DL_SHADOW: [_dl_episode(DL_SHADOW, blip=True)]}
+    a = analyze_dl(results, _dl_params(), None, 175.0)
+    leg = a["legs"]["r"]
+    assert sum(leg["short_swing"]) == 1 and leg["extra_hs"] == 1 and leg["extra_to"] == 1
+    assert min(leg["loop_strides"]) < 0.6
+    text = report_dl(a, policy="p.zip", config_path="c.json", sweep=[(0, 12.0)], kept=[0], rate_hz=175.0)
+    assert "| no is_stance flicker (runs under 200 ms) | 0 stance, 1 swing | 0 stance, 1 swing | **FAIL** |" in text
+
+
+def test_the_dl_plot_draws(tmp_path):
+    from tools.rollout_controllers import DL_ASSIST, DL_SHADOW, EXO_OFF, analyze_dl, plot_dl
+
+    results = {case: [_dl_episode(case)] for case in (EXO_OFF, DL_SHADOW, DL_ASSIST)}
+    a = analyze_dl(results, _dl_params(), None, 175.0)
+    plot_dl(results, a, _dl_params(), None, tmp_path / "dl.png")
+    assert (tmp_path / "dl.png").stat().st_size > 10_000
+
+
 @pytest.fixture(scope="module")
 def env():
     from tools.rollout_controllers import CASES, DEFAULT_CONFIG, make_env

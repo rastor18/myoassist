@@ -48,12 +48,14 @@ from collections.abc import Callable, Sequence
 import numpy as np
 
 from myoassist_utils.exo_ctrl import TickSchedule
+from myoassist_utils.exo_ctrl.boot_state import REEL_IN, REEL_OUT
 from myoassist_utils.exo_ctrl.device import FootForce
 from myoassist_utils.exo_ctrl.factory import build_leg_exos
 from myoassist_utils.exo_ctrl.fourpoint_spline import FourPointSpline
 from myoassist_utils.exo_ctrl.torque_adapter import PLANTARFLEXION_SIGN
 
 DEFAULT_CONFIG = pathlib.Path("rl_train/train/train_configs/exoboot_spline/imitation_22_DephyExoBoot_L1_exoboot_spline.json")
+DL_CONFIG = pathlib.Path("rl_train/train/train_configs/exoboot_dl/imitation_22_DephyExoBoot_L1_exoboot_dl.json")
 DEVICE_ENV_ID = "myoAssistLegImitationExoDevice-v0"
 SIDES = ("r", "l")  # the device controllers' actuator order: right, then left
 # The case every controller is compared against, and whose sweep picks the start indices.
@@ -653,6 +655,428 @@ def report(analysis: dict, *, policy, config_path, sweep: list[tuple[int, float]
     return "\n".join(lines) + "\n"
 
 
+# --- the DL task -------------------------------------------------------------------------------------------------------
+#
+# The DL suite's cases: "DL shadow" runs the whole DL task (sensors, network, estimator, state machine) and applies no
+# torque, so the gait is the exo-off gait and the network can be judged against the policy's own contacts; "DL" applies
+# its torque. Gait events are the network's is_stance edges, so the checks are the network's: is_stance against contact
+# stance, its stance-phase head against the true stance phase (linear in time from contact onset to end, which is how
+# the head behaves on the boot's own logs: within RMSE 0.02 of linear between its is_stance edges), heel strikes and
+# toe-offs against contact onsets and ends, its speed head against the pelvis.
+
+DL_SHADOW, DL_ASSIST = "DL shadow", "DL"
+DL_EXTRA_KEYS = ("is_stance", "stance_phase_head", "speed_head", "speed", "assist_on", "gyro_x", "gyro_y", "gyro_z")
+DL_SETTLE = 2.0  # s into the episode before the network is judged: its 200-sample window (1.14 s) starts zero-filled
+DL_SHORT_RUN = 0.2  # an is_stance run (stance or swing) shorter than this is flicker: stances last ~0.65 s, swings ~0.45
+DL_MATCH = 0.15  # an is_stance edge this close to a contact's onset (end) is that contact's heel strike (toe-off)
+DL_PHASE_GATE = 0.03  # decision gate 2's stance-phase RMSE
+GYRO_BANDS = ((5.0, 10.0), (10.0, 20.0), (20.0, 40.0), (40.0, 87.5))  # Hz, up to the 175 Hz samples' Nyquist
+
+
+def in_contact(t: np.ndarray, onsets: np.ndarray, ends: np.ndarray) -> np.ndarray:
+    """Whether each time lies in a contact (from its onset to its end; one still on at the end has a NaN end)."""
+    out = np.zeros(len(t), dtype=bool)
+    for onset, end in zip(onsets, ends):
+        out |= (t >= onset) & ((t < end) if np.isfinite(end) else True)
+    return out
+
+
+def true_stance_phase(t: np.ndarray, onsets: np.ndarray, ends: np.ndarray) -> np.ndarray:
+    """Per time, (t - onset) / (end - onset) inside a complete contact, NaN elsewhere."""
+    out = np.full(len(t), np.nan)
+    for onset, end in zip(onsets, ends):
+        if np.isfinite(end):
+            inside = (t >= onset) & (t < end)
+            out[inside] = (t[inside] - onset) / (end - onset)
+    return out
+
+
+def run_lengths(t: np.ndarray, on: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(durations of the complete stance runs, of the complete swing runs) of the boolean ``on`` sampled at ``t``: a run
+    from its first sample to the next run's first sample. The runs cut by the record's start and end are left out."""
+    starts = np.flatnonzero(np.r_[False, on[1:] != on[:-1]])
+    durations = np.diff(t[starts])
+    values = on[starts[:-1]]
+    return durations[values], durations[~values]
+
+
+def nearest_offsets(found: np.ndarray, expected: np.ndarray, tolerance: float) -> tuple[np.ndarray, int, np.ndarray]:
+    """Match each expected event with the nearest unused found one within ``tolerance``, either side. Returns the
+    offsets (found - expected) of the matched, the number of expected left unmatched (missed), and the found matching
+    none (extra)."""
+    used = np.zeros(len(found), dtype=bool)
+    offsets, missed = [], 0
+    for event in expected:
+        gaps = np.where(used, np.inf, np.abs(found - event))
+        j = int(np.argmin(gaps)) if len(found) else -1
+        if j >= 0 and gaps[j] <= tolerance:
+            used[j] = True
+            offsets.append(found[j] - event)
+        else:
+            missed += 1
+    return np.array(offsets), missed, found[~used]
+
+
+def band_rms(x: np.ndarray, rate_hz: float, bands=GYRO_BANDS) -> tuple[float, list[float]]:
+    """The RMS of ``x`` (mean removed) above the first band's low edge, and in each band, from its Hann-windowed spectrum
+    (the window keeps a strong slow component, such as the stride's swing, from leaking into the bands)."""
+    x = np.asarray(x, dtype=float) - np.mean(x)
+    window = np.hanning(len(x))
+    freqs = np.fft.rfftfreq(len(x), 1.0 / rate_hz)
+    # One-sided, normalized so that the sum over a band is the mean square in it.
+    power = 2.0 * np.abs(np.fft.rfft(x * window)) ** 2 / (len(x) ** 2 * np.mean(window**2))
+
+    def rms(low, high):
+        return float(np.sqrt(power[(freqs > low) & (freqs <= high)].sum()))
+
+    return rms(bands[0][0], np.inf), [rms(low, high) for low, high in bands]
+
+
+def dl_expected_profile(phase: np.ndarray, params, stride: float, stance_fraction: float) -> np.ndarray:
+    """What the DL task delivers at true gait ``phase`` of a steady gait whose stance lasts ``stance_fraction`` of the
+    stride, were the network exact: the spline at 0.6 x the stance phase, from the end of reel-in to toe-off."""
+    spline = FourPointSpline(
+        rise_fraction=params.rise_fraction,
+        peak_fraction=params.peak_fraction,
+        fall_fraction=params.fall_fraction,
+        peak_torque=params.peak_torque,
+        bias_torque=params.bias_torque,
+        peak_hold_time=params.peak_hold_time,
+    )
+    stance_phase = np.clip(phase / stance_fraction, 0.0, 1.0)
+    on = (phase >= params.reel_in_time / stride) & (phase < stance_fraction)
+    return np.where(on, [spline.torque(0.6 * p) for p in stance_phase], 0.0)
+
+
+def _state_runs(t: np.ndarray, state: np.ndarray, code: int) -> np.ndarray:
+    """How long each complete run of control state ``code`` lasted."""
+    durations_on, _ = run_lengths(t, state == code)
+    return durations_on
+
+
+def analyze_dl(results: dict[str, list[Episode]], params, model, rate_hz: float) -> dict:
+    """Every DL check, per leg, over all kept episodes: the network in "DL shadow", the torque in "DL"."""
+    tick_s = 1.0 / rate_hz
+    a = {"tick_s": tick_s, "min_stride": params.min_stride_duration, "legs": {}, "gait": [], "nonfinite": []}
+
+    def stances(ep, side):
+        s = ep.substeps
+        onsets, ends = contacts(
+            s["t"], s[f"grf_{side}"], on=params.grf_on_newtons, off=params.grf_off_newtons, min_unload=params.min_unload_time
+        )
+        return split_contacts(onsets, ends, s["t"][-1])
+
+    for side in SIDES:
+        leg = {key: [] for key in ("agreement", "phase_err", "hs", "to", "short_stance", "short_swing", "loop_strides")}
+        leg.update({key: [] for key in ("speed", "speed_head", "pelvis_speed", "assist_on_at", "assist_share", "gyro_hi")})
+        leg.update(gyro_bands=[], gyro_x=[], gyro_y=[], missed_hs=0, extra_hs=0, missed_to=0, extra_to=0, assist_off=0)
+        for ep in results.get(DL_SHADOW, []):
+            s = ep.substeps
+            tick = s["tick"] == 1
+            t = s["t"][tick]
+            onsets, ends, _, _ = stances(ep, side)
+            finished = ends[np.isfinite(ends)]
+            if not len(onsets) or not len(finished):
+                continue
+            judged = (t >= t[0] + DL_SETTLE) & (t >= onsets[0]) & (t <= finished[-1])
+            on = s[f"is_stance_{side}"][tick] == 1
+            leg["agreement"].append(float(np.mean(on[judged] == in_contact(t, onsets, ends)[judged])))
+            short_stance, short_swing = run_lengths(t[judged], on[judged])
+            leg["short_stance"].append(int(np.sum(short_stance < DL_SHORT_RUN)))
+            leg["short_swing"].append(int(np.sum(short_swing < DL_SHORT_RUN)))
+            rise = np.r_[False, on[1:] & ~on[:-1]] & judged
+            fall = np.r_[False, ~on[1:] & on[:-1]] & judged
+            lo, hi = t[judged][0], t[judged][-1]
+            expected_hs = onsets[(onsets >= lo) & (onsets <= hi)]
+            expected_to = finished[(finished >= lo) & (finished <= hi)]
+            offsets, missed, extra = nearest_offsets(t[rise], expected_hs, DL_MATCH)
+            leg["hs"] += list(offsets)
+            leg["missed_hs"] += missed
+            leg["extra_hs"] += len(extra)
+            offsets, missed, extra = nearest_offsets(t[fall], expected_to, DL_MATCH)
+            leg["to"] += list(offsets)
+            leg["missed_to"] += missed
+            leg["extra_to"] += len(extra)
+            leg["loop_strides"] += list(np.diff(t[rise]))
+            truth = true_stance_phase(t, onsets, ends)
+            head = np.clip(s[f"stance_phase_head_{side}"][tick], 0.0, 1.0)
+            scored = judged & np.isfinite(truth)
+            leg["phase_err"] += list(head[scored] - truth[scored])
+            leg["speed"].append(float(np.mean(s[f"speed_{side}"][tick][judged])))
+            leg["speed_head"].append(float(np.mean(s[f"speed_head_{side}"][tick][judged])))
+            x = np.interp([lo, hi], ep.steps["t"], ep.steps["pelvis_tx"])
+            leg["pelvis_speed"].append(float((x[1] - x[0]) / (hi - lo)))
+            assist = s[f"assist_on_{side}"][tick] == 1
+            if assist.any():
+                first = int(np.argmax(assist))
+                leg["assist_on_at"].append(float(t[first] - t[0]))
+                leg["assist_share"].append(float(assist[first:].mean()))
+                leg["assist_off"] += int(np.count_nonzero(assist[first:-1] & ~assist[first + 1 :]))
+            high, bands = band_rms(s[f"gyro_z_{side}"][tick][judged], rate_hz)
+            leg["gyro_hi"].append(high)
+            leg["gyro_bands"].append(bands)
+            leg["gyro_x"] += list(s[f"gyro_x_{side}"][tick][judged])
+            leg["gyro_y"] += list(s[f"gyro_y_{side}"][tick][judged])
+        leg.update(applied_error=0.0, off_tick=0, tick_gaps=set(), profiles=[], peak_phase=[], peaks=[], impulses=[])
+        leg.update(reel_in=[], reel_out=[], strides=[], fractions=[], assisted_at=[])
+        for ep in results.get(DL_ASSIST, []):
+            s = ep.substeps
+            cmd, applied = s[f"cmd_{side}"], s[f"applied_{side}"]
+            leg["applied_error"] = max(leg["applied_error"], float(np.nanmax(np.abs(applied - cmd))))
+            leg["off_tick"] += changes_off_tick(cmd, s["tick"])
+            leg["tick_gaps"] |= {int(g) for g in np.diff(np.flatnonzero(s["tick"] == 1))}
+            onsets, ends, _, _ = stances(ep, side)
+            durations, fractions = stride_table(onsets, ends)
+            leg["strides"] += list(durations)
+            leg["fractions"] += list(fractions)
+            phase, rows = stride_average(s["t"], cmd, onsets)
+            assisted = np.nanmax(rows, axis=1) > 0 if len(rows) else np.zeros(0, dtype=bool)
+            leg["profiles"] += list(rows[assisted])
+            leg["peak_phase"] += list(phase[np.nanargmax(rows[assisted], axis=1)]) if assisted.any() else []
+            leg["phase_bins"] = phase
+            dt = float(np.median(np.diff(s["t"])))
+            for start, stop in zip(onsets[:-1], onsets[1:]):
+                inside = (s["t"] >= start) & (s["t"] < stop)
+                if cmd[inside].max() > 0:
+                    leg["peaks"].append(float(cmd[inside].max()))
+                    leg["impulses"].append(float(cmd[inside].sum() * dt))
+            state = s[f"control_state_{side}"]
+            leg["reel_in"] += list(_state_runs(s["t"], state, REEL_IN))
+            leg["reel_out"] += list(_state_runs(s["t"], state, REEL_OUT))
+            on = s[f"assist_on_{side}"] == 1
+            if on.any():
+                leg["assisted_at"].append(float(s["t"][np.argmax(on)] - s["t"][0]))
+        a["legs"][side] = leg
+    for case, eps in results.items():
+        for ep in eps:
+            recorded = [ep.substeps[k] for k in ("t", "cmd_r", "cmd_l", "grf_r", "grf_l")] + list(ep.steps.values())
+            if not all(np.all(np.isfinite(v)) for v in recorded) or ep.ending == "non-finite observation":
+                a["nonfinite"].append((case, ep.start_index))
+            strides = np.concatenate([np.diff(stances(ep, side)[0]) for side in SIDES])
+            speed = (ep.steps["pelvis_tx"][-1] - ep.steps["pelvis_tx"][0]) / max(ep.duration - ep.dt, ep.dt)
+            a["gait"].append(
+                dict(
+                    case=case,
+                    index=ep.start_index,
+                    duration=ep.duration,
+                    ending=ep.ending,
+                    speed=speed,
+                    stride=float(np.mean(strides)) if len(strides) else np.nan,
+                    plantarflexion=-np.degrees(min(ep.steps["ankle_angle_r"].min(), ep.steps["ankle_angle_l"].min())),
+                )
+            )
+    a["same_as_exo_off"] = max(
+        (
+            float(np.max(np.abs(off.steps[j] - on.steps[j]))) if len(off.steps[j]) == len(on.steps[j]) else np.inf
+            for off, on in zip(results.get(EXO_OFF, []), results.get(DL_SHADOW, []))
+            for j in STEP_JOINTS
+        ),
+        default=np.nan,
+    )
+    return a
+
+
+def plot_dl(results: dict[str, list[Episode]], analysis: dict, params, model, path: pathlib.Path) -> None:
+    """Torque on the true gait phase per leg; 3 s of the network against the contacts; the filtered speed."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(figsize=(11, 9), layout="constrained")
+    grid = fig.add_gridspec(3, 2, height_ratios=[1.3, 1.0, 0.8])
+    fine = np.linspace(0, 1, 1001)
+    for col, side in enumerate(SIDES):
+        ax = fig.add_subplot(grid[0, col])
+        leg = analysis["legs"][side]
+        if leg["profiles"]:
+            rows = np.array(leg["profiles"])
+            phase, mean, sd = leg["phase_bins"], np.nanmean(rows, axis=0), np.nanstd(rows, axis=0)
+            ax.fill_between(phase, mean - sd, mean + sd, color=DELIVERED, alpha=0.18, linewidth=0)
+            ax.plot(phase, mean, color=DELIVERED, linewidth=2, label=f"delivered, mean ± sd of {len(rows)} strides")
+        if leg["strides"]:
+            stride, fraction = float(np.mean(leg["strides"])), float(np.nanmean(leg["fractions"]))
+            expected = dl_expected_profile(fine, params, stride, fraction)
+            ax.plot(fine, expected, color=REFERENCE, linewidth=2, label="the DL task with an exact network")
+        ax.set(title=f"{'Right' if side == 'r' else 'Left'} ankle (DL)", xlabel="true gait phase (contact to contact)")
+        ax.set_ylabel("plantarflexion torque (N·m)")
+        ax.set_xlim(0, 1)
+        ax.legend(loc="upper right", frameon=False, fontsize=8)
+    eps = results.get(DL_SHADOW, [])
+    if eps:
+        ep = max(eps, key=lambda e: e.duration)
+        s = ep.substeps
+        tick = s["tick"] == 1
+        t = s["t"][tick]
+        onsets, ends = contacts(
+            s["t"], s["grf_r"], on=params.grf_on_newtons, off=params.grf_off_newtons, min_unload=params.min_unload_time
+        )
+        onsets, ends, _, _ = split_contacts(onsets, ends, s["t"][-1])
+        later = onsets[onsets > t[0] + DL_SETTLE + 2.0]
+        t0 = later[0] if len(later) else t[0]
+        window = (t >= t0) & (t <= t0 + 3.0)
+        ax = fig.add_subplot(grid[1, :])
+        ax.fill_between(t[window], 0, in_contact(t, onsets, ends)[window], step="post", color=MUTED, alpha=0.25, lw=0)
+        ax.plot(t[window], true_stance_phase(t, onsets, ends)[window], color=REFERENCE, lw=2, label="true stance phase")
+        ax.plot(t[window], np.clip(s["stance_phase_head_r"][tick][window], 0, 1), color=DELIVERED, lw=2, label="network")
+        ax.step(t[window], s["is_stance_r"][tick][window], where="post", color=INK, lw=1.2, label="network is_stance")
+        ax.set(title=f"Right leg, DL shadow, 3 s of episode {ep.start_index} (grey: foot contact)", ylabel="stance phase")
+        ax.legend(loc="upper right", frameon=False, fontsize=8, ncol=3)
+        ax2 = fig.add_subplot(grid[2, :])
+        for side, color in (("r", DELIVERED), ("l", REFERENCE)):
+            ax2.plot(
+                t, np.where(s[f"speed_{side}"][tick] >= 0, s[f"speed_{side}"][tick], np.nan), color=color, lw=1.5, label=side
+            )
+        for level in (params.dl_speed_on, params.dl_speed_off):
+            ax2.axhline(level, color=MUTED, lw=1, ls="--")
+        x = ep.steps["pelvis_tx"]
+        ax2.axhline((x[-1] - x[0]) / (ep.steps["t"][-1] - ep.steps["t"][0]), color=INK, lw=1, label="pelvis, mean")
+        ax2.set(ylabel="filtered speed (m/s)", xlabel="time (s)", title="the network's speed, low-passed (on/off: dashed)")
+        ax2.legend(loc="lower right", frameon=False, fontsize=8, ncol=3)
+    for ax in fig.axes:
+        ax.grid(color="#e6e5e0", linewidth=0.8)
+        ax.set_axisbelow(True)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def report_dl(analysis: dict, *, policy, config_path, sweep: list[tuple[int, float]], kept: list[int], rate_hz: float) -> str:
+    legs = analysis["legs"]
+
+    def rmse(leg):
+        e = np.asarray(leg["phase_err"])
+        return float(np.sqrt(np.mean(e**2))) if len(e) else np.nan
+
+    def pct(values, q):
+        return float(np.percentile(values, q)) if len(values) else np.nan
+
+    lines = [
+        "# DL rollouts",
+        "",
+        f"Policy `{policy}`, config `{config_path}`, {datetime.date.today().isoformat()}.",
+        "",
+        f"{len(sweep)} start indices tried with the exo off; {len(kept)} walked long enough and were run in every case: "
+        + ", ".join(f"{i} ({d:.1f} s)" for i, d in sweep if i in kept)
+        + f". The network is judged from {DL_SETTLE:g} s into each episode, between the first contact onset and the last "
+        "contact end.",
+        "",
+        "## Pass bar",
+        "",
+        "| check | right | left | |",
+        "|---|---|---|---|",
+    ]
+
+    def row(name, fmt, ok):
+        cells = [fmt(legs[side]) for side in SIDES]
+        lines.append(f"| {name} | {cells[0]} | {cells[1]} | {_pass(all(ok(legs[side]) for side in SIDES))} |")
+
+    lines.append(f"| no NaN or crash | | | {_pass(not analysis['nonfinite'])} |")
+    gait_same = analysis["same_as_exo_off"]
+    lines.append(f"| shadow gait identical to exo off | max difference {gait_same:.1e} | | {_pass(gait_same == 0)} |")
+    row(
+        f"stance phase vs the true one (RMSE, gate {DL_PHASE_GATE:g})",
+        lambda leg: f"{rmse(leg):.3f}",
+        lambda leg: rmse(leg) <= DL_PHASE_GATE,
+    )
+    row(
+        f"every contact stance a heel strike, within {DL_MATCH * 1e3:.0f} ms",
+        lambda leg: f"{len(leg['hs'])} of {len(leg['hs']) + leg['missed_hs']}; {_fmt(leg['hs'], 1e3, unit=' ms')}",
+        lambda leg: leg["missed_hs"] == 0 and len(leg["hs"]) > 0,
+    )
+    row(
+        "no other heel strike (no stride split)",
+        lambda leg: f"{leg['extra_hs']} extra; shortest stride {min(leg['loop_strides'], default=np.nan):.2f} s",
+        lambda leg: leg["extra_hs"] == 0 and bool(leg["loop_strides"]) and min(leg["loop_strides"]) > analysis["min_stride"],
+    )
+    row(
+        f"no is_stance flicker (runs under {DL_SHORT_RUN * 1e3:.0f} ms)",
+        lambda leg: f"{sum(leg['short_stance'])} stance, {sum(leg['short_swing'])} swing",
+        lambda leg: sum(leg["short_stance"]) + sum(leg["short_swing"]) == 0,
+    )
+    row(
+        "applied torque = command",
+        lambda leg: f"max error {leg['applied_error']:.1e} N·m",
+        lambda leg: leg["applied_error"] < 1e-6,
+    )
+    row(
+        "torque held between ticks",
+        lambda leg: f"{leg['off_tick']} changes off a tick",
+        lambda leg: leg["off_tick"] == 0,
+    )
+    row(
+        f"ticks every 6 or 7 substeps ({rate_hz:g} Hz in 1200 Hz physics)",
+        lambda leg: ", ".join(str(g) for g in sorted(leg["tick_gaps"])),
+        lambda leg: bool(leg["tick_gaps"]) and leg["tick_gaps"] <= {6, 7},
+    )
+    lines += [
+        "",
+        "## The network, applying no torque (DL shadow)",
+        "",
+        "| | right | left |",
+        "|---|---|---|",
+        "| is_stance = contact stance | " + " | ".join(_fmt(legs[s]["agreement"], 100, 2, "%") for s in SIDES) + " |",
+        "| stance phase - true (mean ± sd) | " + " | ".join(_fmt(legs[s]["phase_err"], digits=3) for s in SIDES) + " |",
+        "| stance phase RMSE | " + " | ".join(f"{rmse(legs[s]):.3f}" for s in SIDES) + " |",
+        "| heel strike - contact onset (ms) | " + " | ".join(_fmt(legs[s]["hs"], 1e3) for s in SIDES) + " |",
+        "| toe-off - contact end (ms) | "
+        + " | ".join(f"{_fmt(legs[s]['to'], 1e3)}; {legs[s]['missed_to']} missed, {legs[s]['extra_to']} extra" for s in SIDES)
+        + " |",
+        "| filtered speed (m/s) | " + " | ".join(_fmt(legs[s]["speed"], digits=3) for s in SIDES) + " |",
+        "| speed head, unfiltered (m/s) | " + " | ".join(_fmt(legs[s]["speed_head"], digits=3) for s in SIDES) + " |",
+        "| pelvis speed, same window (m/s) | " + " | ".join(_fmt(legs[s]["pelvis_speed"], digits=3) for s in SIDES) + " |",
+        "| assistance switched on at (s into the episode) | "
+        + " | ".join(_fmt(legs[s]["assist_on_at"], digits=2) for s in SIDES)
+        + " |",
+        "| share of ticks on after that; switches off | "
+        + " | ".join(f"{_fmt(legs[s]['assist_share'], 100, 1, '%')}; {legs[s]['assist_off']}" for s in SIDES)
+        + " |",
+        "| gyro_z RMS above 5 Hz (deg/s) | " + " | ".join(_fmt(legs[s]["gyro_hi"]) for s in SIDES) + " |",
+        "| ... in 5-10 / 10-20 / 20-40 / 40-87.5 Hz | "
+        + " | ".join(
+            " / ".join(f"{v:.1f}" for v in np.mean(legs[s]["gyro_bands"], axis=0)) if legs[s]["gyro_bands"] else "n/a"
+            for s in SIDES
+        )
+        + " |",
+        "| gyro_x, 5th-95th percentile (deg/s) | "
+        + " | ".join(f"{pct(legs[s]['gyro_x'], 5):+.0f} to {pct(legs[s]['gyro_x'], 95):+.0f}" for s in SIDES)
+        + " |",
+        "| gyro_y, 5th-95th percentile (deg/s) | "
+        + " | ".join(f"{pct(legs[s]['gyro_y'], 5):+.0f} to {pct(legs[s]['gyro_y'], 95):+.0f}" for s in SIDES)
+        + " |",
+        "",
+        "## Torque (DL)",
+        "",
+        "| | right | left |",
+        "|---|---|---|",
+        "| assistance switched on at (s into the episode) | "
+        + " | ".join(_fmt(legs[s]["assisted_at"], digits=2) for s in SIDES)
+        + " |",
+        "| peak per assisted stride (N·m) | " + " | ".join(_fmt(legs[s]["peaks"], digits=1) for s in SIDES) + " |",
+        "| impulse per assisted stride (N·m·s) | " + " | ".join(_fmt(legs[s]["impulses"], digits=2) for s in SIDES) + " |",
+        "| phase of the peak, on the true stride | " + " | ".join(_fmt(legs[s]["peak_phase"], digits=3) for s in SIDES) + " |",
+        "| reel-in (ms) | " + " | ".join(_fmt(legs[s]["reel_in"], 1e3) for s in SIDES) + " |",
+        "| reel-out (ms) | " + " | ".join(_fmt(legs[s]["reel_out"], 1e3) for s in SIDES) + " |",
+        "| stride (s); stance fraction | "
+        + " | ".join(f"{_fmt(legs[s]['strides'], digits=3)}; {_fmt(legs[s]['fractions'], digits=3)}" for s in SIDES)
+        + " |",
+        "",
+        "## Gait",
+        "",
+        "Reported, not required: the policy was not trained with this assistance.",
+        "",
+        "| case | start index | duration (s) | ending | speed (m/s) | stride (s) | peak plantarflexion (°) |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for g in analysis["gait"]:
+        lines.append(
+            f"| {g['case']} | {g['index']} | {g['duration']:.1f} | {g['ending']} | {g['speed']:.2f} | {g['stride']:.2f} "
+            f"| {g['plantarflexion']:.1f} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def save_episodes(results: dict[str, list[Episode]], path: pathlib.Path) -> None:
     arrays = {}
     for case, eps in results.items():
@@ -693,6 +1117,17 @@ SUITES = {
         analyze=analyze,
         plot=plot,
         report=report,
+    ),
+    "DL": Suite(
+        config=DL_CONFIG,
+        cases={
+            DL_SHADOW: dict(device_controller="exoboot_dl", shadow_mode=True),
+            DL_ASSIST: dict(device_controller="exoboot_dl"),
+        },
+        analyze=analyze_dl,
+        plot=plot_dl,
+        report=report_dl,
+        extra_keys=DL_EXTRA_KEYS,
     ),
 }
 # Every case by name, the exo-off one first.
