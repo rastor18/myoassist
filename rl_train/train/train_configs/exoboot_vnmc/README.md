@@ -99,8 +99,11 @@ disagree, the port follows the logs (the torque filter and the toe-off, below).
 
 All fields of `exo_controller_params`.
 
-1. **Once per episode: the warm-up.** No reel-in, so no stance, until the gait phase is valid: the third heel strike by
-   default (`num_strides_required` 2), as for 4PTS. Then the first stance is scaled by `peak_torque / 100`: it commands a
+1. **Once per episode: the warm-up.** A heel strike starts reel-in, then stance, but the boot's state machine also
+   requires a gait phase (`state_machines.py:196-198`), which takes two whole strides (`num_strides_required` 2): so
+   the first two strikes of an episode start nothing, and the third does, as for 4PTS. On the boot this gate passed
+   unseen: its sessions began with `SWING_ONLY` on, and by the time it was switched off (15 s in) the phase was valid,
+   so the first heel strike after that started the first stance. Then the first stance is scaled by `peak_torque / 100`: it commands a
    fifth of the muscle's torque (`0.25 × 0.8`, the filter's 0.8). From the second on, each stance is scaled to the one before. The
    toe-off tick already uses the new scaling, so the first stance ends with a one-tick spike (6.7 ms) to about four
    times its torque, as on the boot.
@@ -198,8 +201,20 @@ against 0.68–1.03), so the toe-off and the shape follow this gait, not the par
 
 **Gait survival (reported, not required).** With the VNMC's torque, which the policy was never trained with, it drifts
 off the reference motion (the imitation env's 0.6 rad termination) after 5.7–7.0 s from all 6 start points (one fall),
-at 1.10–1.16 m/s with strides shortening to 0.95–1.08 s; 4PTS lasted 5–14 s on the same policy. A policy trained with
-the VNMC should do better, but that has not been tested.
+at 1.10–1.16 m/s with strides shortening to 0.95–1.08 s; 4PTS lasted 5–14 s on the same policy. Most of those endings
+are the imitation env's drift stop, not falls, and the torque is what the policy cannot take. From the same 6 start
+points, with the policy unchanged:
+
+| `peak_torque` | with the drift stop | without it (a fall or the 33.3 s limit ends it) |
+|---|---|---|
+| 0 (exo off) | 32.3–33.3 s | 33.3 s, all 6 |
+| 10 N·m | 8.4–21.3 s, all off the reference | 33.3 s, all 6 |
+| 15 N·m | 7.9–20.5 s, all off the reference | 33.3 s, all 6 |
+| 25 N·m | 5.7–7.0 s (one fall) | 5.9–7.1 s, all falls |
+
+So for evaluating the VNMC on a policy trained without it, 10–15 N·m with the drift stop off
+(`env._out_of_trajectory_threshold = inf`, as `tools/render_controller_video.py` sets it) keeps it walking the whole
+episode at 1.08–1.11 m/s. A policy trained with the VNMC should take 25 N·m, but that has not been tested.
 
 To see it, `tools/render_controller_video.py --case VNMC` renders an episode with, per leg, the VNMC's muscle: its
 stimulation, force and length, and its raw torque against this stance's peak, the 80% the toe-off must fall below,
