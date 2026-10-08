@@ -113,6 +113,11 @@ config JSON, or override them on the command line as `--config.env_params.exo_co
    first stride, so by default assistance starts at the **third** heel strike: about 2.2 s of 1.1 s strides after the
    first one. Training spends that time unassisted in every episode, which `exo_phase_valid` measures (above).
 
+   On the boot it is a heel strike that starts each stance; its state machine also requires a gait phase then
+   (`state_machines.py:196-198`), which is what holds off the first two strikes here. On the boot that check passed
+   unseen: its sessions began with `SWING_ONLY` on, the gait phase was valid by the time it was switched off (15 s
+   in), and the first heel strike after that started the first stance.
+
    `num_strides_required 1` starts it at the second strike, about a stride sooner. It also needs
    `num_strides_to_average 1`, because the phase can only be averaged over strides that were checked (the controller
    refuses the combination otherwise):
