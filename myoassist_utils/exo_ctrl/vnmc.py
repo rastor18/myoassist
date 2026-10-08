@@ -10,20 +10,23 @@ the VNMC sessions. The committed code is an earlier snapshot; where its logs and
   F_mtu / F_max``, with the force from 20 ms earlier. It integrates on every loop iteration: in stance at that
   stimulation, in every other state at 0.01 (state_machines.py:236-238). It is never reset, so its state at a heel
   strike depends on the swing before it.
-* **The scaling, as it ran:** each stance's torque is scaled so that the previous stance's peak would reach
-  ``PEAK_TORQUE``: ``scalefactor = PEAK_TORQUE / (0.8 x previous stance's raw peak)`` (``PEAK_TORQUE / 100`` before the
-  first toe-off) and the command is ``min(PEAK_TORQUE, scalefactor x 0.8 x torque)``. The committed code has neither
-  the 0.8 nor PEAK_TORQUE (it hard-codes 25 N*m).
-* **Toe-off from the muscle's own torque:** once the stance's raw peak passes 5 N*m, four ticks in a row with the torque
-  not rising latch it, and it fires on the first tick after that on which the torque is at most 80% of the peak and
-  not below the tick before. The state machine sees it on the next tick, as on the boot (``toe_off_switch_vnmc``), and
-  reels out.
+* **The torque filter, as it ran:** the boot passes the muscle's torque through an exponential moving average,
+  ``trq_filt = FILT_ALPHA x trq + (1 - FILT_ALPHA) x trq_filt`` (FILT_ALPHA 0.8), but ``update_muscle_model`` sets
+  ``trq_filt`` to 0 just before it, so it is ``0.8 x trq``, unsmoothed. Peak, toe-off and scaling all run on it.
+* **The scaling, as it ran:** each stance's filtered torque is scaled so that the previous stance's peak would reach
+  ``PEAK_TORQUE``: ``scalefactor = PEAK_TORQUE / previous stance's filtered peak`` (``PEAK_TORQUE / 100`` before the
+  first toe-off) and the command is ``min(PEAK_TORQUE, scalefactor x filtered torque)``. The 0.8 cancels except before
+  the first toe-off. The committed code has neither the filter nor PEAK_TORQUE (it hard-codes 25 N*m).
+* **Toe-off from the muscle's own torque:** once the stance's filtered peak passes 5 N*m, eight ticks in a row with the
+  torque not rising latch it, and it fires on the first tick after that on which the torque is at most 80% of the peak
+  and not below the tick before. (The committed code waits four ticks; the logs show eight.) The state machine sees it
+  on the next tick, as on the boot (``toe_off_switch_vnmc``), and reels out.
 
 What runs around it is the boot's WALKING task: a heel strike (here from foot contact force, as for 4PTS) with a valid
 stride-average gait phase starts reel-in; stance follows once reel-in ends; the VNMC's toe-off starts reel-out (0.2 s:
 ``SoftReelOutController`` with ``force_timer_to_complete``); swing follows. Only stance applies torque. Unlike the
 boot's other stance controllers, losing the gait phase does not end a VNMC stance, and nothing but its toe-off does:
-a stance whose raw peak never passes 5 N*m lasts through swing until a later rise of the torque ends it.
+a stance whose filtered peak never passes 5 N*m (6.25 N*m of the muscle's) lasts through swing until a later rise of the torque ends it.
 
 Plain Python floats throughout, since it runs inside the physics loop.
 """
@@ -45,11 +48,11 @@ from myoassist_utils.exo_ctrl.torque_adapter import ankle_torque_actuator
 IDLE_STIMULATION = 0.01
 # Before the first toe-off the boot scales by PEAK_TORQUE over this ("Start w/ high number to ease user in").
 INITIAL_REFERENCE_PEAK = 100.0
-# As ran: the previous stance's peak counts at 80%, and so does the torque it scales.
-PEAK_SHARE = 0.8
-# VirtualNeuroMuscularController.toe_off_logic
-TOE_OFF_MIN_PEAK = 5.0  # N*m, raw
-TOE_OFF_FALLING_TICKS = 4
+# The boot's FILT_ALPHA. Its moving average restarts from 0 every tick, so the filtered torque is FILT_ALPHA x torque.
+FILT_ALPHA = 0.8
+# VirtualNeuroMuscularController.toe_off_logic, on the filtered torque
+TOE_OFF_MIN_PEAK = 5.0  # N*m, of the filtered torque (6.25 N*m of the muscle's)
+TOE_OFF_FALLING_TICKS = 8
 TOE_OFF_PEAK_FRACTION = 0.8
 # SoftReelOutController(force_timer_to_complete=True), max_reel_out_time
 VNMC_REEL_OUT_TIME = 0.2
@@ -218,6 +221,7 @@ class VNMCStance:
     Every tick steps the muscle exactly once: ``stance_tick`` in stance (``command``), ``idle_tick`` in any other state
     (the state machine's ``update_muscle_model(m_stim=0.01)``). ``start_stance`` is ``command(reset=True)``'s
     ``reset_constants``: it clears the toe-off detector and the stance's peak, not the muscle and not the scaling.
+    ``stance_peak`` is the filtered torque's (``FILT_ALPHA``).
     """
 
     def __init__(self, *, muscle: MusculoTendonJoint, gain: float, peak_torque: float):
@@ -258,15 +262,15 @@ class VNMCStance:
         muscle = self.muscle
         self.stimulation = IDLE_STIMULATION + self.gain * muscle.sensory_force
         muscle.step(self.stimulation, math.radians(angle_deg))
-        torque = muscle.torque
-        if torque > self.stance_peak:
-            self.stance_peak = torque
-        self.toe_off = self.toe_off_detector.step(torque, self.stance_peak)
+        filtered = FILT_ALPHA * muscle.torque
+        if filtered > self.stance_peak:
+            self.stance_peak = filtered
+        self.toe_off = self.toe_off_detector.step(filtered, self.stance_peak)
         if self.toe_off:
-            self._reference_peak = PEAK_SHARE * self.stance_peak
+            self._reference_peak = self.stance_peak
         # Recomputed every stance tick, after the toe-off: the tick it fires already scales by this stance's peak.
         self.scalefactor = self.peak_torque / self._reference_peak
-        self.command = min(self.peak_torque, self.scalefactor * (PEAK_SHARE * torque))
+        self.command = min(self.peak_torque, self.scalefactor * filtered)
         return self.command
 
 

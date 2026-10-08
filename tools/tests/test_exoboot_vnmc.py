@@ -133,34 +133,36 @@ def _fires(torques):
     return [i for i, fired in enumerate(out) if fired]
 
 
-def test_toe_off_fires_on_the_first_rise_after_four_falls_below_80_percent():
-    torques = [2, 8, 14, 20, 19, 18, 17, 15.5, 15.6]  # peak 20; 4 falls latch; 15.6 rises, <= 16
-    assert _fires(torques) == [8]
+def test_toe_off_fires_on_the_first_rise_after_eight_falls_below_80_percent():
+    torques = [2, 8, 14, 20, 19.5, 19, 18.5, 18, 17.5, 17, 16, 15.5, 15.6]  # peak 20; 8 falls latch; 15.6 rises, <= 16
+    assert _fires(torques) == [12]
 
 
-def test_three_falls_do_not_latch():
-    assert _fires([2, 8, 14, 20, 19, 17, 15, 15.2, 14, 13, 12, 11, 11.5]) == [12], "only the second fall run latches"
+def test_seven_falls_do_not_latch():
+    """The committed code latched after four; the boot as it ran waited for eight (the replay's toe-offs match then)."""
+    torques = [2, 8, 14, 20, 19, 18.5, 18, 17.5, 17, 16.5, 15, 15.2, 14, 13.5, 13, 12.5, 12, 11.5, 11, 10.5, 10.8]
+    assert _fires(torques) == [20], "only the second fall run latches"
 
 
 def test_a_rise_above_80_percent_of_the_peak_keeps_waiting():
-    """Latched, the rise at 17 (above 16) does not fire; the latch holds, and the next rise below 16 does."""
-    assert _fires([2, 10, 20, 19, 18.5, 18, 17.5, 17.6, 16.5, 15.5, 15.7]) == [10]
+    """Latched, the rise at 17.3 (above 16) does not fire; the latch holds, and the next rise below 16 does."""
+    assert _fires([2, 10, 20, 19.5, 19, 18.5, 18, 17.8, 17.6, 17.4, 17.2, 17.3, 16.5, 15.5, 15.7]) == [14]
 
 
 def test_no_toe_off_while_the_peak_stays_at_5_n_m():
-    """A stance whose raw peak never passes 5 N*m never toes off: its falls never count."""
+    """A stance whose filtered peak never passes 5 N*m never toes off: its falls never count."""
     torques = [1, 3, 5, 4, 3, 2, 1, 0.5, 0.8, 0.2, 0.3] * 3
     assert _fires(torques) == []
 
 
 def test_a_plateau_counts_as_falling_and_as_rising():
     """The boot's comparisons are not strict: an equal torque is both a fall (<=) and the rise (>=)."""
-    assert _fires([2, 10, 20, 19, 18, 17, 15, 15]) == [7]
+    assert _fires([2, 10, 20, 19, 18, 17, 16.5, 16.2, 16.1, 15.9, 15.9]) == [10]
 
 
 def test_the_latch_clears_after_firing_and_on_reset():
     detector, peak = TorqueToeOffDetector(), 0.0
-    for torque in [2, 10, 20, 19, 18, 17, 15]:
+    for torque in [2, 10, 20, 19, 18, 17, 16.5, 16.2, 16.1, 15.9, 15.5]:
         peak = max(peak, torque)
         detector.step(torque, peak)
     detector.reset()
@@ -204,9 +206,10 @@ def test_the_reflex_stimulates_with_the_delayed_force_in_stance_only():
 
 
 def test_scaling_as_it_ran():
-    """Before any toe-off the torque is scaled by PEAK / 100; from the toe-off tick on, by PEAK / (0.8 x that stance's
-    peak), so the next stance's command reaches PEAK where its raw torque reaches the last peak; clipped at PEAK."""
-    first = [2.0, 10.0, 40.0, 38.0, 36.0, 34.0, 31.0, 31.5]  # peak 40, toe-off on the last tick
+    """The filtered torque (0.8 x the muscle's) is scaled by PEAK / 100 before any toe-off; from the toe-off tick on, by
+    PEAK / that stance's filtered peak, so the next stance's command reaches PEAK where its torque reaches the last peak;
+    clipped at PEAK."""
+    first = [2.0, 10.0, 40.0, 39.0, 38.0, 37.0, 36.0, 35.0, 34.0, 33.0, 31.0, 31.5]  # peak 40, toe-off on the last tick
     second = [5.0, 20.0, 40.0, 50.0]
     stance = VNMCStance(muscle=ScriptedMuscle(first + second), gain=1.468, peak_torque=25.0)
     commands = [stance.stance_tick(0.0) for _ in first[:-1]]
@@ -218,13 +221,13 @@ def test_scaling_as_it_ran():
     commands = [stance.stance_tick(0.0) for _ in second]
     assert commands[:3] == [pytest.approx(25.0 * x / 40.0) for x in second[:3]]
     assert commands[3] == 25.0, "clipped at the peak torque"
-    assert stance.stance_peak == 50.0
+    assert stance.stance_peak == 0.8 * 50.0, "the filtered torque's peak"
 
 
 def test_reset_restores_the_initial_scaling_and_the_muscle():
-    muscle = ScriptedMuscle([2.0, 10.0, 40.0, 38.0, 36.0, 34.0, 31.0, 31.5])
+    muscle = ScriptedMuscle([2.0, 10.0, 40.0, 39.0, 38.0, 37.0, 36.0, 35.0, 34.0, 33.0, 31.0, 31.5])
     stance = VNMCStance(muscle=muscle, gain=1.468, peak_torque=20.0)
-    for _ in range(8):
+    for _ in range(12):
         stance.stance_tick(0.0)
     assert stance.scalefactor != 0.2
     stance.reset()
@@ -253,7 +256,7 @@ class Strikes:
 
 
 RATE = 150.0
-STANCE_TORQUE = [2.0, 10.0, 20.0, 19.0, 18.0, 17.0, 15.0, 15.5]  # toe-off on its last tick
+STANCE_TORQUE = [2.0, 10.0, 20.0, 19.5, 19.0, 18.5, 18.0, 17.5, 17.0, 16.0, 15.5, 15.6]  # toe-off on its last tick
 
 
 def _leg(torques, *, reel_in=0.15):
@@ -302,7 +305,7 @@ def test_the_state_path_and_the_toe_off_one_tick_late():
     states = [s for _, _, s, _ in rows]
     toe_off = n_before + len(STANCE_TORQUE) - 1
     assert states[n_before : toe_off + 1] == [STANCE] * len(STANCE_TORQUE), "stance through the toe-off tick"
-    assert rows[toe_off][1] == pytest.approx(25.0 / (0.8 * 20.0) * 0.8 * 15.5), "the toe-off tick still commands"
+    assert rows[toe_off][1] == pytest.approx(25.0 / (0.8 * 20.0) * 0.8 * 15.6), "the toe-off tick still commands"
     assert states[toe_off + 1] == REEL_OUT and rows[toe_off + 1][1] == 0.0, "reel-out on the next tick"
     reel_out = [k for k, s in enumerate(states) if s == REEL_OUT and k > toe_off]
     assert (reel_out[-1] - reel_out[0] + 1) / RATE == pytest.approx(0.2 + 1 / RATE, abs=1 / RATE)
@@ -318,7 +321,7 @@ def test_a_stance_under_5_n_m_lasts_through_swing_and_the_next_strike():
     strikes = [0.5, 1.6, 2.7]
     rows = _walk(leg, 2.7 + 0.2 + 0.1, strikes)
     n_before = [s for _, _, s, _ in rows].index(STANCE)
-    leg, _ = _leg([0.0] * n_before + [3.0] * 2000)  # the raw torque never passes 5 N*m
+    leg, _ = _leg([0.0] * n_before + [3.0] * 2000)  # the filtered torque never passes 5 N*m
     rows = _walk(leg, 8.0, strikes + [3.8])  # a fourth strike in stance, then none: the phase is lost after 2.4 s
     start = next(t for t, _, s, _ in rows if s == STANCE)
     tail = [(t, s, d) for t, _, s, d in rows if t > 2.7 + 0.2]

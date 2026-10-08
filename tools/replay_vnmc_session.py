@@ -47,6 +47,7 @@ from myoassist_utils.exo_ctrl.vnmc import (
     IDLE_STIMULATION,
     VNMC_REEL_OUT_TIME,
     MusculoTendonJoint,
+    FILT_ALPHA,
     TorqueToeOffDetector,
     VNMCLeg,
     VNMCStance,
@@ -322,10 +323,10 @@ def durations(t: np.ndarray, state: np.ndarray, value, start: float, end: float)
 
 
 def toe_off_on_logged_torque(log: VnmcLog, start: float, end: float) -> np.ndarray:
-    """The toe-off rule run on each logged stance's own vnmc_torque: rows from where it fires to the stance's last row
-    (0 = it ends on that row; NaN = the rule never fired)."""
+    """The toe-off rule run on each logged stance's own vnmc_torque, filtered as the boot filtered it: rows from where it
+    fires to the stance's last row (0 = it ends on that row; NaN = the rule never fired)."""
     out = []
-    torque = log.muscle["vnmc_torque"]
+    torque = FILT_ALPHA * log.muscle["vnmc_torque"]
     for a, b in _runs(log.state, STANCE):
         if not (start <= log.t[a] <= end):
             continue
@@ -391,9 +392,11 @@ def report_side(
     print(f"              commanded_torque in stance: {_diff_stats(stance['command'][in_stance], log.commanded[in_stance])}")
     last = np.array([b for a, b in _runs(log.state, STANCE) if start <= log.t[a] <= end])
     fired = stance["toe_off"] == 1
+    elsewhere = fired & in_stance
+    elsewhere[last] = False
     print(
         f"              the port's toe-off fires on the stance's last row in {np.mean(fired[last]):.2%} of {len(last)} "
-        f"stances, and on {int(np.count_nonzero(fired[in_stance])) - int(np.count_nonzero(fired[last]))} other rows"
+        f"stances, and on {int(np.count_nonzero(elsewhere))} other rows"
     )
     offsets = toe_off_on_logged_torque(log, start, end)
     print(

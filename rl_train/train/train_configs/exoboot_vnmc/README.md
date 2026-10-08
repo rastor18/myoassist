@@ -1,7 +1,7 @@
 # ExoBoot VNMC — a scripted exo, the policy learns muscles only
 
 The NeuMove ExoBoot's virtual neuromuscular controller (`VirtualNeuroMuscularController`, the boot's config
-`jayston_song_config.py`), ported to run inside the RL env in place of the policy's exo torque. One Geyer-type
+`vnmc_config.py`), ported to run inside the RL env in place of the policy's exo torque. One Geyer-type
 muscle-tendon unit about each ankle is driven by the measured ankle angle and stimulated by positive force feedback;
 its torque is scaled stance by stance, and it decides its own toe-off. It runs inside the physics loop at 150 Hz, close
 to the boot's own 175 Hz loop. The policy still emits the two exo actions; the controller overrides them on every
@@ -50,7 +50,7 @@ Every controller field is overridable from the command line as `--config.env_par
 ## What the controller does
 
 As the boot ran it in the VNMC sessions. The boot's committed code is an earlier snapshot; where its logs and that code
-disagree, the port follows the logs (the scaling, below).
+disagree, the port follows the logs (the torque filter and the toe-off, below).
 
 * **The muscle** (`MusculoTendonJoint`, the boot's `muscle_model.MusculoTendonJoint`): F_max 4000 N, l_opt 0.04 m,
   v_max 6 l_opt/s, l_slack 0.26 m, rho 0.5, e_ref 0.1, a 0.04 m moment arm, phi_ref 0, activation time constants 10 ms
@@ -60,19 +60,24 @@ disagree, the port follows the logs (the scaling, below).
 * **The reflex**: in stance the stimulation is `0.01 + vnmc_gain × F/F_max` (`vnmc_gain` 1.468, the boot's
   `VNMC_GAIN`), with the force from 20 ms earlier: 3 ticks at 150 Hz, 4 at the boot's 175 Hz (22.9 ms, as
   `round(0.02 × 175)` makes it). Outside stance it is 0.01.
-* **The scaling, as it ran**: each stance's command is `min(peak_torque, scalefactor × 0.8 × muscle torque)`, with
-  `scalefactor = peak_torque / (0.8 × the previous stance's peak muscle torque)`, and `peak_torque / 100` before the
-  first toe-off. So a stance whose muscle torque reaches the previous stance's peak commands `peak_torque` (25 N·m),
-  and is clipped there. The committed code scales by `25 / previous peak` with no 0.8 and a hard-coded 25 N·m; the logs
-  show the 0.8 on both sides of the product and the live `PEAK_TORQUE` (it followed the session's warm-up ramp).
-* **Toe-off from the muscle's own torque**: once the stance's peak passes 5 N·m, four ticks in a row with the torque
-  not rising latch it; it fires on the first later tick at most 80% of the peak and not below the tick before. The
-  state machine sees it one tick later (the toe-off tick itself still commands torque), and reels out.
+* **The torque filter, as it ran**: the boot passes the muscle's torque through an exponential moving average
+  (`FILT_ALPHA` 0.8, meant to keep ankle noise from firing the toe-off early), but its `update_muscle_model` resets the
+  average to 0 just before each update, so the "filtered" torque is 0.8 × the muscle's, with no smoothing. The peak,
+  the toe-off and the scaling all run on it, here too.
+* **The scaling**: each stance's command is `min(peak_torque, scalefactor × filtered torque)`, with
+  `scalefactor = peak_torque / the previous stance's filtered peak`, and `peak_torque / 100` before the first toe-off.
+  So a stance whose torque reaches the previous stance's peak commands `peak_torque` (25 N·m), and is clipped there;
+  the filter's 0.8 cancels, except in the first stance. The committed code has no filter and a hard-coded 25 N·m; the
+  logs show the 0.8 and the live `PEAK_TORQUE` (it followed the session's warm-up ramp).
+* **Toe-off from the muscle's own torque**: once the stance's filtered peak passes 5 N·m, eight ticks in a row with the
+  torque not rising latch it; it fires on the first later tick at most 80% of the peak and not below the tick before.
+  (The committed code waits four ticks; the logs show eight.) The state machine sees it one tick later (the toe-off
+  tick itself still commands torque), and reels out.
 * **The state machine around it** is the boot's WALKING task (`BootStateMachine`): reel-out (0.2 s, the boot's timer:
   `SoftReelOutController` forced to complete on time) → swing → a heel strike with a gait phase → reel-in
   (`reel_in_time`) → stance → the VNMC's toe-off → reel-out. Only stance applies torque. **Nothing but the VNMC's
-  toe-off ends its stance**: not a heel strike, not a lost gait phase. A stance whose muscle torque never passes 5 N·m
-  (or never rises again below 80% of its peak) runs through swing and the next step, until a later rise fires it;
+  toe-off ends its stance**: not a heel strike, not a lost gait phase. A stance whose filtered torque never passes 5 N·m
+  (6.25 N·m of the muscle's), or never rises again below 80% of its peak, runs through swing and the next step, until a later rise fires it;
   `diagnostics()["stance_time"]` shows it.
 * **Heel strikes from foot contact force**, as for 4PTS (the boot uses a shank gyro): a contact counts once it has
   lasted `min_contact_time` (50 ms), dated back to its onset, and ends once the foot has been unloaded for
@@ -96,7 +101,7 @@ All fields of `exo_controller_params`.
 
 1. **Once per episode: the warm-up.** No reel-in, so no stance, until the gait phase is valid: the third heel strike by
    default (`num_strides_required` 2), as for 4PTS. Then the first stance is scaled by `peak_torque / 100`: it commands a
-   fifth of the muscle's torque (`0.25 × 0.8`). From the second on, each stance is scaled to the one before. The
+   fifth of the muscle's torque (`0.25 × 0.8`, the filter's 0.8). From the second on, each stance is scaled to the one before. The
    toe-off tick already uses the new scaling, so the first stance ends with a one-tick spike (6.7 ms) to about four
    times its torque, as on the boot.
 2. **Every stride: reel-in.** No torque for `reel_in_time` (0.162 s) after each heel strike. The boot ends reel-in on
@@ -123,10 +128,10 @@ On one participant's two VNMC sessions, over the walking at constant parameters 
 |---|---|---|
 | muscle | logged ankle angle and stimulation | bit for bit on 99.9% of rows (99.5% for the velocity); the rest within 2×10⁻¹² N·m, rounding |
 | reflex | the port's own muscle, logged states | stimulation bit for bit on 99.8–99.97% of rows, the rest within 5×10⁻¹⁴ |
-| scaling | the same | scalefactor and command in stance bit for bit on 99.3–100% of rows (below) |
+| scaling | the same | scalefactor and command in stance bit for bit on 99.5–100% of rows, the rest within 6×10⁻¹² |
 | toe-off | the same | the port's toe-off fires on the boot's last stance row in 100% of stances |
-| whole leg | logged heel strikes and angle, the boot's own reel-in ends | control state agrees on 99.6–99.9% of rows; stance ends on the boot's row in 99.5–100% of strides |
-| | the same with a fixed reel-in (each leg's mean) | control state agrees on 98.3–98.7% of rows; stance ends on the boot's row in 93–96% of strides |
+| whole leg | logged heel strikes and angle, the boot's own reel-in ends | control state agrees on 99.9% of rows; stance ends on the boot's row in 99.7–100% of strides |
+| | the same with a fixed reel-in (each leg's mean) | control state agrees on 98.6–98.7% of rows; stance ends on the boot's row in 93.5–95.6% of strides |
 | impulse | the same | per stride within 0.5% of the boot's command (8.9–9.7 N·m·s) |
 | 150 Hz in-loop | the device env's ticks, the logged angle read at each tick | per stride: lag +2.1 to +5.8 ms, peak within 0.4%, median impulse within 0.8%; stance ends 5.5–6.7 ms later; 5–6 of 385 strides off by more than 10% |
 
@@ -135,10 +140,10 @@ On one participant's two VNMC sessions, over the walking at constant parameters 
   have (35–69 per log); the replay finds them by trying each count, and steps through them. Without them the torque
   is off by up to 4 N·m after each one. On the boot the reflex and the toe-off ran on those iterations too: a toe-off
   can fire on one (5 of the 1546 stances did), and the log then shows reel-out on the next row.
-* **The scaling's remaining rows** are two stances (of 1546) whose toe-off the boot took later than its own rule says:
-  in one, the rule fires 12 rows before the boot ended the stance; in the other, 61 rows before and again 48 rows
-  before. The boot let those rises pass, and nothing in the log explains why; that stance's command, and the next
-  stance's scaling, differ. Every other stance follows the rule.
+* **Eight falling ticks, not four.** With the committed code's four, two stances of the 1546 toe off 12 and 61 rows
+  before the boot did, and their command and the next stance's scaling are off by up to 3 N·m; with eight every
+  stance ends on the boot's row. The two rules differ only on a stance whose torque falls for fewer than eight ticks
+  before a rise below 80% of its peak.
 * **Reel-in** is where a fixed time costs: the boot's ended on cable slack, ± 23–26 ms; a stance that starts earlier or
   later builds its reflex differently and can end a few ticks off. It costs nothing in impulse (within 0.5%).
 * **At 150 Hz** the 20 ms delay is exactly 3 ticks (22.9 ms at 175 Hz) and the Euler step is 6.7 ms: the raw muscle
@@ -210,7 +215,7 @@ python tools/render_controller_video.py <train_session_...>/trained_models/<mode
   muscle's length, force and so its toe-off follow from there. They are one participant's, read in quiet standing; a
   policy whose ankle works in another range drives the muscle elsewhere ([Tested on a trained
   policy](#tested-on-a-trained-policy) compares the ranges).
-* **A stance can run through swing.** If the muscle's torque never passes 5 N·m in a stance, or never rises again below
+* **A stance can run through swing.** If the muscle's torque never passes 6.25 N·m in a stance (5 N·m filtered), or never rises again below
   80% of its peak, the stance does not end at push-off; it lasts until a later rise fires the toe-off, assisting
   through swing. `stance_time` in `diagnostics()` shows it; the rollout report counts such stances.
 * **The scaling adapts to whatever gait the policy walks**, stance by stance: it normalizes the muscle's peak to

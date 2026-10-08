@@ -933,7 +933,7 @@ def report_vnmc(analysis: dict, *, policy, config_path, sweep: list[tuple[int, f
         "## Stances and torque",
         "",
         "Per stance (control state 4) or per stride between foot-contact onsets. A stance that ran through swing is one "
-        "with a contact onset inside it: its raw muscle torque never passed 5 N·m, or never rose again below 80% of its "
+        "with a contact onset inside it: its raw muscle torque never passed 6.25 N·m (5 N·m filtered), or never rose again below 80% of its "
         "peak, so its toe-off fired late.",
         "",
         "| | shadow: right | shadow: left | assisting: right | assisting: left |",
