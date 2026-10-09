@@ -235,12 +235,16 @@ python tools/render_controller_video.py <train_session_...>/trained_models/<mode
 
 ## Known limits
 
-* **The network fails decision gate 2 in the dynamic sim** (above): stance phase RMSE 0.08–0.12 against the gate's 0.03,
-  heel strikes 70–105 ms early, with or without the out-of-plane filter. Training with this controller would assist
-  on a phase that leads the true one by ~0.1. Against real contact on the boot it passes (above), so the cause is the
-  sim's inputs, and they differ because the tested policy reverses its shank's swing early (above): no sensor or 3D
-  model change would fix that. **The DL port is parked here**, until a policy trained with it (or one whose terminal
-  swing is closer to the reference's) can be tested.
+* **What is validated, and what is not.**
+  * Validated: the network, state machine, spline and torque against the boot's own logs (above), layer by layer;
+    the network against force-plate contact on the boot (RMSE 0.024–0.029, heel strikes 5–10 ms early); in the env, the
+    shadow config's gait bit for bit, torque = command, ticks and holds; and the network on the reference motion
+    (RMSE 0.023–0.030, heel strikes 31–38 ms early, the planar model's and a kinematic replay's known gaps).
+  * Not validated: the network on a policy that walks with this controller. On the tutorial policy (trained without
+    it) the stance phase is off by RMSE 0.08–0.11 against the gate's 0.03 and heel strikes come 70–105 ms early, with
+    or without the out-of-plane filter, because that policy reverses its shank's swing early (above); training with it
+    from that policy would assist on a phase that leads the true one by ~0.1. Whether a policy trained with the DL
+    walks so that the network reads it correctly has not been tested.
 * **Assistance comes on 1.0 s into each episode,** before the network's 200-sample window has filled (1.14 s): the speed
   head's first replies, low-passed, cross 0.7 m/s on the way up. The boot started its sessions standing, with the
   criterion off.
