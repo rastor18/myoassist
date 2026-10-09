@@ -39,7 +39,8 @@ Configuration files are located in `rl_train/train/train_configs/`:
 - `imitation_tutorial_22_separated_net_full_obs.json` - Same setup with full exo observation.
 - `imitation_tutorial_22_separated_net_exo_off*.json` - Same setup with the exo held at a constant command (exo off).
 - `test.json` - Minimal config for the quick training test (see [Reinforcement Learning](index.md#2-quick-training-test)).
-- `device_sweep/` - Eight configs, one per device, for the per-device sweep.
+- `device_sweep/` - Eight configs, one per bilateral exo, for the per-device sweep.
+- `prosthesis/` - Four configs, one per prosthetic device, on amputee models. See the [directory README](https://github.com/neumovelab/myoassist/blob/main/rl_train/train/train_configs/prosthesis/README.md).
 
 ### Configuration Hierarchy
 
@@ -107,6 +108,13 @@ TrainSessionConfigBase
 | `model_path` | Optional literal MJCF path (escape hatch); leave null to compose from `msk_key`/`device_key` | null |
 | `reference_data_path` | Path to reference motion data (accepts `.npz` or `.json`) | "rl_train/reference_data/short_reference_gait.npz" |
 | `reference_data_keys` | Joint keys for reference data | ["ankle_angle_l", "hip_flexion_l"] |
+| `reward_curriculum` | Maps a reward key to `[start_scale, end_scale]`; its configured weight is multiplied by a scale moving linearly between them across `[reward_curriculum_start, reward_curriculum_end]` of the run. Empty disables it. Used to let imitation bootstrap and then leave, which only makes sense where the reference cannot describe the model. | {} |
+| `reward_curriculum_start` / `_end` | Fractions of `total_timesteps` the ramp spans. | 0.2 / 0.6 |
+| `curriculum_start_velocity` | Target velocity the run starts at, ramping linearly to `min`/`max_target_velocity` over `curriculum_fraction` of the run and held there. 0 disables it, which is what the intact configs do. | 0.0 |
+| `curriculum_fraction` | Fraction of `total_timesteps` the ramp takes. | 0.5 |
+| `scale_reference_playback` | Advance the imitation reference at the target velocity rather than one frame per control step. Off by default. The reference walks at 1.281 m/s, so under a slow target the qpos terms would otherwise demand full-stride angles at full cadence while the forward term asks for a slow walk; no gait satisfies both. | false |
+| `device_ctrl_scale` | Fraction of its own `ctrlrange` the policy may command on the device actuators, applied by narrowing `actuator_ctrlrange` at setup. 1.0 is the model's full authority. Below 1.0 for a device whose joint cannot absorb its own actuator. | 1.0 |
+| `out_of_trajectory_joint_keys` | Joints the episode-ending tracking check watches. Empty -> every key in `qpos_imitation_rewards`, which is what the intact configs do. Set it to decouple "guide this joint" from "end the episode when this joint drifts": an amputee config gives the residual limb a weak posture term without a healthy-gait deviation there killing the episode. | [] |
 | `prev_trained_policy_path` | Path to previous trained policy | null |
 | `hidden_geom_groups` | Geom groups hidden from rendering. Which group holds clutter is an authoring convention of the model, so it is set here. Rendering only. | [] |
 | `joint_limit_sensor_keys` | Joint-limit sensor names feeding `joint_constraint_force_penalty`; empty uses `MyoAssistLegBase.JOINT_LIMIT_SENSOR_NAMES` | [] |

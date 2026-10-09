@@ -86,6 +86,24 @@ class MyoAssistLegBase(env_base.MujocoEnv):
         device_ids = [i for i in range(self.sim.model.nu) if self.sim.model.actuator_dyntype[i] != mujoco.mjtDyn.mjDYN_MUSCLE]
         self._device_actuator_ids = np.asarray(device_ids, dtype=int)
 
+        # Narrow what the policy may command on the device, before anything else reads
+        # `ctrlrange`: myosuite maps the [-1, 1] action onto it, and the effort normaliser below
+        # derives from it, so both follow from this one edit.
+        #
+        # Needed because a device actuator can overpower its own joint limit. `OpenSourceLeg_A_L1`
+        # drives its ankle with 168 N*m into a joint with zero damping and zero armature: a limit
+        # is a soft constraint whose stiffness scales with the DOF's effective inertia, and with
+        # none the joint runs 4.3 rad past its own +-0.52 rad range and stays there. Measured on a
+        # trained policy, the ankle sat outside its limits 92% of the time with the device on
+        # against 31% with it off, and 31% is the same regime as the intact model's passive toe
+        # joint. Capping the command is a workaround, not a fix -- the joint needs inertia, or the
+        # device needs a control rate above this env's 30 Hz -- but it is the part that is ours.
+        if device_ids and env_params.device_ctrl_scale != 1.0:
+            assert 0.0 < env_params.device_ctrl_scale <= 1.0, (
+                f"device_ctrl_scale must be in (0, 1]; got {env_params.device_ctrl_scale}"
+            )
+            self.sim.model.actuator_ctrlrange[self._device_actuator_ids] *= env_params.device_ctrl_scale
+
         # Which entries of `data.act` belong to muscles. Not every device leaves `act` to the
         # muscles alone: UTAnkleExo_L2's two actuators declare `filter` dynamics, so na is 24 for
         # a 22-muscle model and the last two entries are the device's filter states. Slicing them
@@ -161,6 +179,10 @@ class MyoAssistLegBase(env_base.MujocoEnv):
                 self.rwd_keys_wt[key] = weight_sum
             else:
                 self.rwd_keys_wt[key] = value
+
+        # The weights as configured, so a curriculum can scale from them repeatedly rather than
+        # compounding its own output.
+        self._rwd_keys_wt_configured = dict(self.rwd_keys_wt)
 
         self._initialize_pose()
 
@@ -392,11 +414,37 @@ class MyoAssistLegBase(env_base.MujocoEnv):
             raise ValueError("target_velocity_period must be provided for sinusoidal mode")
         self._target_velocity_period = target_velocity_period
         # self._modulate_target_velocity()
+        self._initial_target_velocity = initial_target_velocity
         self._target_velocity = initial_target_velocity
         self._prev_step_changed_time = self.sim.data.time
 
         self._min_target_velocity = min_target_velocity
         self._max_target_velocity = max_target_velocity
+
+    def set_reward_weight_scales(self, scales: dict):
+        """Scale reward weights mid-run, relative to what the config declared.
+
+        `rwd_keys_wt` is what `get_reward_dict` multiplies each term by to form `dense`, so this
+        is the structure a reward curriculum has to move. Scales are applied to the configured
+        values rather than to the current ones, so repeated calls do not compound.
+
+        Note this deliberately leaves `_reward_keys_and_weights` alone: the per-joint imitation
+        weights still shape which joint matters relative to which, and the out-of-trajectory
+        check still reads its key list from there. What changes is how much of the imitation
+        term reaches the total.
+        """
+        for key, base in self._rwd_keys_wt_configured.items():
+            self.rwd_keys_wt[key] = base * float(scales.get(key, 1.0))
+
+    def set_target_velocity_range(self, min_velocity: float, max_velocity: float):
+        """Move the band episodes draw their target velocity from, mid-run.
+
+        Called through `VecEnv.env_method` by the training callback so a speed curriculum can
+        raise the demand as the policy improves. Takes effect from the next episode; the current
+        one keeps the target it started with, so a rollout is never scored against two demands.
+        """
+        self._min_target_velocity = float(min_velocity)
+        self._max_target_velocity = float(max_velocity)
 
     def _change_mode_and_target_velocity_randomly(self):
         velocity_mode_for_this_episode = random.choice(list(MyoAssistLegBase.VelocityMode))
@@ -404,17 +452,20 @@ class MyoAssistLegBase(env_base.MujocoEnv):
         target_velocity_period = random.uniform(
             self._min_target_velocity_period, self._max_target_velocity_period
         )  # maximum acc/dec is self._target_velocity_period / 2
-        if velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.UNIFORM:
-            initial_target_velocity = random.uniform(self._min_target_velocity, self._max_target_velocity)
-        elif velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.SINUSOIDAL:
+        if velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.SINUSOIDAL:
             initial_target_velocity = self._calc_sinusoidal_target_velocity(
-                starting_phase, target_velocity_period, self._min_target_velocity, self._max_target_velocity
+                starting_phase, target_velocity_period, self._min_target_velocity, self._max_target_velocity, time=0.0
             )
-        elif velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.STEP:
-            initial_target_velocity = np.random.uniform(self._min_target_velocity, self._max_target_velocity)
-        # Keyword arguments: from 4a4cbe3 these were positional and out of order, which put the random
-        # phase in max_target_velocity. The setter stores min/max, so the band drifted to two random
-        # numbers in [0, 2*pi] m/s by the first reset. Passing our own band back keeps it the config's.
+        else:
+            initial_target_velocity = random.uniform(self._min_target_velocity, self._max_target_velocity)
+        # Keyword arguments, because these were positional and two of them were in the wrong
+        # slots: `starting_phase` landed in `max_target_velocity`. Since a phase is drawn from
+        # [0, 2*pi], the episode's speed band became [0, 6.28] m/s, and because the setter also
+        # writes `_min_target_velocity` from what it is handed, the corruption carried into the
+        # next reset and both bounds drifted. Measured on the shipped configs, which all declare
+        # 1.25 m/s: the target actually averaged 2.94 m/s over 400 resets, with 47% of episodes
+        # asking for more than 3 m/s and a maximum of 6.26. Every run in this repo before this
+        # fix trained against that, so their numbers are not reproducible under it.
         self.set_target_velocity_mode_manually(
             mode=velocity_mode_for_this_episode,
             starting_phase=starting_phase,
@@ -424,10 +475,10 @@ class MyoAssistLegBase(env_base.MujocoEnv):
             target_velocity_period=target_velocity_period,
         )
 
-    def _calc_sinusoidal_target_velocity(self, phase: float, period: float, min_velocity: float, max_velocity: float):
-        return (
-            min_velocity + (max_velocity - min_velocity) * (np.sin(phase + 2 * np.pi * self.sim.data.time / (period)) + 1) / 2
-        )
+    def _calc_sinusoidal_target_velocity(
+        self, phase: float, period: float, min_velocity: float, max_velocity: float, time: float
+    ):
+        return min_velocity + (max_velocity - min_velocity) * (np.sin(phase + 2 * np.pi * time / (period)) + 1) / 2
 
     def _modulate_target_velocity(self):
         if self._velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.UNIFORM:
@@ -435,7 +486,11 @@ class MyoAssistLegBase(env_base.MujocoEnv):
             pass
         elif self._velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.SINUSOIDAL:
             self._target_velocity = self._calc_sinusoidal_target_velocity(
-                self._starting_phase, self._target_velocity_period, self._min_target_velocity, self._max_target_velocity
+                self._starting_phase,
+                self._target_velocity_period,
+                self._min_target_velocity,
+                self._max_target_velocity,
+                time=self.sim.data.time,
             )
         elif self._velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.STEP:
             if self.sim.data.time - self._prev_step_changed_time > self._target_velocity_period:
@@ -443,9 +498,35 @@ class MyoAssistLegBase(env_base.MujocoEnv):
                 self._prev_step_changed_time = self.sim.data.time
 
     def reset(self, **kwargs):
-        self._step_count_per_episode = 0
+        self._start_target_velocity_schedule()
+        return self._reset_simulation(**kwargs)
+
+    def _start_target_velocity_schedule(self):
+        """Put the target velocity at the start of the next episode's schedule.
+
+        Runs before the simulation reset, when `sim.data.time` still holds the previous episode's
+        clock, so the schedule is read at t = 0, the time the reset restarts the clock at.
+        Reading it at the old clock made a sinusoidal episode start at one speed and command
+        another on its first step, and put the first change of a step episode one previous
+        episode's length late. Training draws a new schedule; evaluation restarts the one it
+        was given.
+        """
         if not self.is_evaluate_mode:
             self._change_mode_and_target_velocity_randomly()
+        self._prev_step_changed_time = 0.0
+        if self._velocity_mode_for_this_episode == MyoAssistLegBase.VelocityMode.SINUSOIDAL:
+            self._target_velocity = self._calc_sinusoidal_target_velocity(
+                self._starting_phase,
+                self._target_velocity_period,
+                self._min_target_velocity,
+                self._max_target_velocity,
+                time=0.0,
+            )
+        else:
+            self._target_velocity = self._initial_target_velocity
+
+    def _reset_simulation(self, **kwargs):
+        self._step_count_per_episode = 0
         self.sim.data.joint("pelvis_tx").qvel[0] = self._target_velocity
 
         self.sim.forward()
@@ -459,6 +540,7 @@ class MyoAssistLegBase(env_base.MujocoEnv):
         # generate resets
         # obs = super().reset(reset_qpos= self.sim.data.qpos, reset_qvel=self.sim.data.qvel, **kwargs)
         obs = super().reset(**kwargs)
+        assert self.sim.data.time == 0.0, f"reset left the clock at {self.sim.data.time}, not at the schedule's t = 0"
         return obs
 
     def _get_done(self):
