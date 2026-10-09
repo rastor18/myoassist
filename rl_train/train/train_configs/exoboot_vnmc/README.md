@@ -200,6 +200,17 @@ through mid-stance and pushes off about 0.1 of the stride earlier. A constant of
 plantarflexed, the sim's ankle gives the same command (the per-stance scaling absorbs the force level). A policy
 trained with the VNMC walks differently, so its shape should move, but that has not been tested.
 
+**On the reference motion the command has the boot's timing.** The VNMC was also run on MyoAssist's reference motion
+itself, replayed kinematically through the same model (no torque applied; touchdown and lift-off from the heel and toe
+heights, since a kinematic replay's feet slide and have no ground force). Its stance runs from 0.15 to 0.66 of the
+stride and its command peaks at 0.50 of it, against 0.13–0.15, 0.67 and 0.51–0.53 on the boot's sessions; on the
+tutorial policy the peak comes at 0.43–0.47. Through mid-stance the policy's ankle follows the reference's; it pushes
+off about 0.05 of the stride earlier. The reference's ankle is itself more dorsiflexed than the participant's, so its
+raw muscle torque runs higher (43 and 55 N·m against 21 and 31), which the per-stance scaling takes out. So the port
+reproduces the boot's command on a human-like gait, and the early peak on the tutorial policy is its push-off.
+
+![VNMC per stride on the tutorial policy and on the reference motion](figures/vnmc_policy_vs_reference.png)
+
 **The muscle works off the participant's range.** Through the standing angles, the policy's ankle reads as the boot's
 would, and over its walking it spans −21 to +12° (right) and −29 to +8° (left), p1 to p99, against −7 to +21° and −12 to
 +15° on the boot: 13–17° more dorsiflexed. The muscle's force and torque run higher than on the boot (force up to
