@@ -152,8 +152,9 @@ python tools/rollout_controllers.py <train_session_...>/trained_models/<model>.z
 ```
 
 It writes `report.md`, `torque_vs_phase.png` and `episodes.npz` to `rl_train/results/rollouts/<time>/`. On the
-MyoAssist tutorial policy (as in 4PTS's README: 10 start points, exo off it walks 31–33 s at 1.11 m/s, ~270 stances
-per leg judged), with the planar channels and with the out-of-plane filter:
+MyoAssist tutorial policy (as in 4PTS's README: 10 start points, exo off it walks 29–33 s at 1.11 m/s, ~260 stances
+per leg judged), with the planar channels and with the out-of-plane filter (measured before the merge of revision's
+episode reset; re-measured after it, the planar column moves by at most 1 ms and 0.001):
 
 | check | planar, right / left | synthesized, right / left | |
 |---|---|---|---|
@@ -218,11 +219,11 @@ force-plate contact), mean ± sd; the dots in the middle row are when is_stance 
 ![The DL network on the tutorial policy, the reference motion and the boot](figures/dl_policy_vs_reference.png)
 
 Assisting, the delivered torque has the boot's peak (25 N·m) and, on the right, its shape on the true gait cycle (r
-0.98 against the boot's stance command; peak at 0.565–0.575 of the stride against the boot's 0.585); on the left it
-peaks early, at 0.48 (r 0.62–0.76). Reel-in lasts 160 ms and reel-out 177 ms (the configured 157 and 172, rounded up to
+0.98 against the boot's stance command; peak at 0.57 of the stride against the boot's 0.585); on the left it
+peaks early, at 0.48–0.52 (r 0.62–0.76). Reel-in lasts 160 ms and reel-out 177 ms (the configured 157 and 172, rounded up to
 whole ticks), and both show in the control-state band of the video. Assistance comes on 1.0 s into each episode and
-stays on. With 25 N·m the policy, never trained with it, drifts off the reference motion or falls after 4.4–11.4 s;
-unassisted it walks the whole episode from every start point.
+stays on. With 25 N·m the policy, never trained with it, drifts off the reference motion or falls after 4.6–6.4 s
+(4.4–11.4 s before the merge of revision's episode reset); unassisted it walks 29–33 s.
 
 `tools/render_controller_video.py --case DL` (or `--case "DL shadow"`) renders an episode with, on the right, the
 network's newest reply per leg: is_stance, the stance phase, the filtered speed against the on/off thresholds, and
