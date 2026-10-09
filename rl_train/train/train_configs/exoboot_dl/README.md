@@ -184,6 +184,26 @@ contact on 98% of rows (~370 clean stances per leg and session). The treadmill a
 aligned by the shank's impact spike, to about ±10–15 ms. So the network is right on a person and wrong in the sim, and
 the difference is in the sim's inputs (the simulated sensors, the policy's gait, its foot contact), not the network.
 
+**It is the policy's terminal swing, read through gyro_z.** Swapping input channels between the sim's strides and the
+boot's (stride by stride, time-warped between contact onset, contact end and the next onset) and running the network
+on the mix:
+
+| network fed | heel strike − contact onset, right / left |
+|---|---|
+| the sim's channels | −78 / −106 ms |
+| all 8 of the boot's channels, on the sim's stride timing | −4 / −13 ms |
+| the sim's, with the boot's gyro_z | −35 / −59 ms |
+| the boot's, with the sim's gyro_z | −77 / −91 ms |
+| the boot's, with the sim's ankle angle and velocity | −13 / −33 ms |
+
+So the stride timing is not the cause, and gyro_z carries most of it, all from the last 200 ms before contact. In the
+sim the shank ends its forward swing 80–120 ms before the heel lands and rotates back at 250–290 deg/s as it does; on
+the boot it ends 30 ms before, at about 110 deg/s; the network reads the end of the swing as the start of stance. The
+reference motion, replayed kinematically through the same model, ends it 37–42 ms before the heel lands, at about
+90 deg/s (touchdown there: the heel within 1 cm of its lowest point in the stride, which on the policy lands 10 ms
+before force contact). So the early swing reversal is the policy's own gait, not the reference, the boot model or the
+simulated sensors.
+
 Assisting, the delivered torque has the boot's peak (25 N·m) and, on the right, its shape on the true gait cycle (r
 0.98 against the boot's stance command; peak at 0.565–0.575 of the stride against the boot's 0.585); on the left it
 peaks early, at 0.48 (r 0.62–0.76). Reel-in lasts 160 ms and reel-out 177 ms (the configured 157 and 172, rounded up to
@@ -204,9 +224,9 @@ python tools/render_controller_video.py <train_session_...>/trained_models/<mode
 * **The network fails decision gate 2 in the dynamic sim** (above): stance phase RMSE 0.08–0.12 against the gate's 0.03,
   heel strikes 70–105 ms early, with or without the out-of-plane filter. Training with this controller would assist
   on a phase that leads the true one by ~0.1. Against real contact on the boot it passes (above), so the cause is the
-  sim's inputs. **The DL port is parked here.** The next step, when it resumes, is to average each of the 8 input
-  channels around contact in the sim and on the boot and find which shows the stance signature early; that says
-  whether a sensor detail can fix it or a 3D leg model is needed.
+  sim's inputs, and they differ because the tested policy reverses its shank's swing early (above): no sensor or 3D
+  model change would fix that. **The DL port is parked here**, until a policy trained with it (or one whose terminal
+  swing is closer to the reference's) can be tested.
 * **Assistance comes on 1.0 s into each episode,** before the network's 200-sample window has filled (1.14 s): the speed
   head's first replies, low-passed, cross 0.7 m/s on the way up. The boot started its sessions standing, with the
   criterion off.
