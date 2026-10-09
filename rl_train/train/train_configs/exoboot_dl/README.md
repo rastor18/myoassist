@@ -204,6 +204,16 @@ reference motion, replayed kinematically through the same model, ends it 37–42
 before force contact). So the early swing reversal is the policy's own gait, not the reference, the boot model or the
 simulated sensors.
 
+**On the reference motion the network nearly passes.** Fed the reference motion, replayed kinematically through the
+same model and simulated sensors (touchdown and lift-off from the heel and toe heights), the network's stance phase is
+within RMSE 0.023 (right) and 0.030 (left) of the true one, against the gate's 0.03; is_stance agrees with the foot on
+94% of ticks; its heel strikes come 31–38 ms before touchdown and its toe-offs 29–31 ms after lift-off. That residual
+is about what the logs predict for the sim's two known gaps: the planar model's out-of-plane channels (heel strikes
+23–29 ms early) and a kinematic replay's missing heel-strike impact (6–11 ms). It still flickers (22–36 is_stance runs
+under 200 ms in 75 s), as the replay's smooth motion-capture gyro_z lacks the fast content the network leans on.
+
+![The DL network on the tutorial policy and on the reference motion](figures/dl_policy_vs_reference.png)
+
 Assisting, the delivered torque has the boot's peak (25 N·m) and, on the right, its shape on the true gait cycle (r
 0.98 against the boot's stance command; peak at 0.565–0.575 of the stride against the boot's 0.585); on the left it
 peaks early, at 0.48 (r 0.62–0.76). Reel-in lasts 160 ms and reel-out 177 ms (the configured 157 and 172, rounded up to
