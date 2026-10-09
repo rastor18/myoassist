@@ -212,7 +212,10 @@ is about what the logs predict for the sim's two known gaps: the planar model's 
 23–29 ms early) and a kinematic replay's missing heel-strike impact (6–11 ms). It still flickers (22–36 is_stance runs
 under 200 ms in 75 s), as the replay's smooth motion-capture gyro_z lacks the fast content the network leans on.
 
-![The DL network on the tutorial policy and on the reference motion](figures/dl_policy_vs_reference.png)
+On the tutorial policy, the reference motion and the boot's two DL sessions (logged inputs, the boot's anchors at
+force-plate contact), mean ± sd; the dots in the middle row are when is_stance switches, mean ± sd:
+
+![The DL network on the tutorial policy, the reference motion and the boot](figures/dl_policy_vs_reference.png)
 
 Assisting, the delivered torque has the boot's peak (25 N·m) and, on the right, its shape on the true gait cycle (r
 0.98 against the boot's stance command; peak at 0.565–0.575 of the stride against the boot's 0.585); on the left it
