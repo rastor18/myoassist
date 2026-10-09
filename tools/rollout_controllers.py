@@ -170,11 +170,11 @@ class Episode:
 
 def reset_at(env, index: int):
     """``MyoAssistLegImitation.reset``, from reference index ``index`` instead of one drawn at random."""
-    from rl_train.envs.myoassist_leg_imitation import MyoAssistLegImitation
-
     env._imitation_index = int(index)
-    env._pose_at_imitation_index()
-    return super(MyoAssistLegImitation, env).reset(reset_qpos=env.sim.data.qpos, reset_qvel=env.sim.data.qvel)
+    env._imitation_index_exact = float(index)
+    env._start_target_velocity_schedule()  # first: the start state scales the reference velocities by it
+    env._set_episode_start_state()
+    return env._reset_simulation(reset_qpos=env.sim.data.qpos, reset_qvel=env.sim.data.qvel)
 
 
 def run_episode(env, policy, recorder: Recorder, index: int, *, case: str, max_steps: int, safe_height: float) -> Episode:
@@ -215,10 +215,7 @@ def make_env(config_path: pathlib.Path, case: dict, extra_keys: Sequence[str] = 
     config.env_params.device_controller = overrides.pop("device_controller")
     for key, value in overrides.items():
         setattr(config.env_params.exo_controller_params, key, value)
-    # Evaluate mode, at one fixed target speed, as gait_evaluate.py runs it. Outside evaluate mode every reset redraws
-    # the target speed through set_target_velocity_mode_manually with its arguments out of order
-    # (MyoAssistLegBase._change_mode_and_target_velocity_randomly), so after the first reset it lies anywhere between
-    # two random numbers in [0, 2 pi] m/s whatever the config says -- and every reference velocity is scaled by it.
+    # Evaluate mode, at one fixed target speed, as gait_evaluate.py runs it, so every episode is asked the same speed.
     env = EnvironmentHandler.create_environment(config, is_rendering_on=False, is_evaluate_mode=True)
     speed = (config.env_params.min_target_velocity + config.env_params.max_target_velocity) / 2
     env.set_target_velocity_mode_manually(type(env).VelocityMode.UNIFORM, 0.0, speed, speed, speed)

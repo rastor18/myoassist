@@ -71,7 +71,9 @@ def test_butterworth_matches_the_boots_filter():
     )
     got = np.array([port.filter(v) for v in x])
     want = np.array([boot.filter(v) for v in x])
-    np.testing.assert_allclose(got, want, rtol=0, atol=1e-12)
+    # Equal to a few float64 ulps of a signal in the hundreds of deg/s; scipy versions differ in the last bits (1.5e-12
+    # deg/s has been seen), so the tolerance is relative, with a floor for samples near zero.
+    np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-10)
 
 
 def test_butterworth_starts_at_the_first_sample_and_restarts_on_reset():

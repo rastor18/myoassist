@@ -252,6 +252,7 @@ class EnvironmentHandler:
                 log_rollout_freq=config.logger_params.logging_frequency,
                 evaluate_freq=config.logger_params.evaluate_frequency,
                 log_handler=train_log_handler,
+                env_params=config.env_params,
                 original_reward_weights=config.env_params.reward_keys_and_weights,
                 auto_reward_adjust_params=config.auto_reward_adjust_params,
             )
@@ -260,6 +261,7 @@ class EnvironmentHandler:
                 log_rollout_freq=config.logger_params.logging_frequency,
                 evaluate_freq=config.logger_params.evaluate_frequency,
                 log_handler=train_log_handler,
+                env_params=config.env_params,
             )
 
         return custom_callback
