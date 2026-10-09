@@ -201,18 +201,18 @@ python tools/rollout_controllers.py <train_session_...>/trained_models/<model>.z
 It writes `report.md`, `torque_vs_phase.png` and `episodes.npz` to `rl_train/results/rollouts/<time>/`. On the
 MyoAssist tutorial policy (`train_session_20250728-161129_tutorial_partial_obs`, `model_19939328.zip`: 19.9 M steps
 on `Tutorial_L1`, from the repo's history at `e677989`), which walks on `DephyExoBoot_L1` with the exo off at
-1.11 m/s, strides of 1.11 s, for 31–33 s (the 10 longest of 108 start points; about 290 strides per leg):
+1.11 m/s, strides of 1.11 s, for 29–33 s (the 10 longest of 108 start points; about 280 strides per leg):
 
 | check | result |
 |---|---|
-| strikes | every stance a strike (299 of 299 right, 296 of 296 left), dated +2.8 to +3.0 ± 1.9 ms after the contact began; no other strike: the right foot's 22 toe scuffs in swing are ignored; no stride split |
+| strikes | every stance a strike (287 of 287 right, 288 of 288 left), dated +2.8 to +2.9 ± 1.9 ms after the contact began; no other strike: the right foot's 24 toe scuffs in swing are ignored; no stride split |
 | phase | valid from the third strike, then 100% of the time |
 | no torque | the gait is the exo-off gait, bit for bit |
 | applied torque | equals the command (to 2×10⁻¹⁵ N·m) |
 | hold | the torque changes only on the 150 Hz ticks |
-| timing | per stride, +5.4 to +5.6 ± 2.5 ms behind the controller at 1200 Hz (half a tick to see each strike, half a tick of hold); peak within 0.1%, impulse within 0.5% |
+| timing | per stride, +5.2 to +6.0 ± 2.4–2.7 ms behind the controller at 1200 Hz (half a tick to see each strike, half a tick of hold); peak within 0.1%, impulse within 0.5% |
 
-On the true stride the delivered peak lands at phase 0.545–0.557 against the spline's 0.543, ± 0.04–0.07: the boot's
+On the true stride the delivered peak lands at phase 0.550–0.557 against the spline's 0.543, ± 0.04–0.08: the boot's
 estimator predicts phase from the last two strides, and assisted strides vary in length.
 
 To see it, `tools/render_controller_video.py` renders one of those episodes: the model, each boot tinted red by its
@@ -224,25 +224,20 @@ Pick a start index from the rollout report:
 python tools/render_controller_video.py <train_session_...>/trained_models/<model>.zip --start 1280 --seconds 20
 ```
 
-With 4PTS's 25 N·m, which the policy was never trained with, it falls after 6–20 s (and drifts off the reference
-motion, the imitation env's 0.6 rad termination, after 5–14 s), at 1.08–1.20 m/s, with peak plantarflexion of 23–25°
-against 18–21° unassisted. Unassisted it walks the full 33 s from all 10 start points, with or without that
-termination. A policy trained with 4PTS should do better, but that has not been tested.
+With 4PTS's 25 N·m, which the policy was never trained with, it drifts off the reference motion (the imitation env's
+0.6 rad termination) after 4.6–10 s, at 1.10–1.19 m/s, with peak plantarflexion of 23–25° against 18–21° unassisted.
+Unassisted it walks 29–33 s: the full 33 s from 4 of the 10 start points, and off the reference after 29–30.5 s from
+the rest. A policy trained with 4PTS should do better, but that has not been tested.
 
 The tool runs in evaluate mode at the config's target speed, as the repo's own evaluation does.
 
-This branch also fixes two things in how MyoAssist starts episodes, in training and evaluation alike. Policies
-trained on earlier code were trained under both, so compare runs only on the same code version.
-
-* **The target speed in training.** From `4a4cbe3` (2025-08-05), `MyoAssistLegBase._change_mode_and_target_velocity_randomly`
-  passed `set_target_velocity_mode_manually` its arguments out of order. After the first reset a training episode's
-  target speed lay anywhere between two random numbers in [0, 2π] m/s, whatever the config said, and every reference
-  velocity was scaled by it.
-* **The start pose.** `MyoAssistLegImitation.reset` posed only the reference's joints. The toes, and the knee
-  translations and muscle via points that constraints tie to the knee and hip angles, kept the state the previous
-  episode ended with, so each episode started with those constraints violated by up to about 6 cm. Now every joint
-  starts from the keyframe, the reference's joints take the reference pose, and the tied joints sit on their
-  constraints (`tools/tests/test_imitation_reset.py`).
+This branch carries MyoAssist's episode-reset fixes from the lab's `revision` branch, which change how every episode
+starts, in training and evaluation alike. Each reset draws the target speed inside the config's band (before, a
+training episode's target speed lay anywhere between two random numbers in [0, 2π] m/s), then poses every joint: the
+keyframe, the reference's joints, and the joints the equality constraints tie to them, on those constraints (before,
+those kept the state the previous episode ended with). The speed schedule restarts at t = 0
+(`tools/tests/test_episode_reset.py`). Policies trained on earlier code were trained without these fixes, so compare
+runs only on the same code version.
 
 ## Known limits
 
