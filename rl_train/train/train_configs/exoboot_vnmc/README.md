@@ -209,7 +209,9 @@ off about 0.05 of the stride earlier. The reference's ankle is itself more dorsi
 raw muscle torque runs higher (43 and 55 N·m against 21 and 31), which the per-stance scaling takes out. So the port
 reproduces the boot's command on a human-like gait, and the early peak on the tutorial policy is its push-off.
 
-![VNMC per stride on the tutorial policy and on the reference motion](figures/vnmc_policy_vs_reference.png)
+Per stride, mean ± sd, on the tutorial policy, on the reference motion and in the boot's two VNMC sessions (logged):
+
+![VNMC per stride on the tutorial policy, the reference motion and the boot](figures/vnmc_policy_vs_reference.png)
 
 **The muscle works off the participant's range.** Through the standing angles, the policy's ankle reads as the boot's
 would, and over its walking it spans −21 to +12° (right) and −29 to +8° (left), p1 to p99, against −7 to +21° and −12 to
