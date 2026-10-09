@@ -178,16 +178,16 @@ python tools/rollout_controllers.py <train_session_...>/trained_models/<model>.z
 
 It writes `report.md`, `torque_vs_phase.png` and `episodes.npz` to `rl_train/results/rollouts/<time>/`. On the MyoAssist
 tutorial policy (the one 4PTS was tested on: `train_session_20250728-161129_tutorial_partial_obs`, `model_19939328.zip`),
-which walks on `DephyExoBoot_L1` with the exo off for 32–33 s at 1.10–1.12 m/s, strides of 1.11 s (the 6 start points of
-54 tried that walk at least 8 s; 182 and 178 strikes):
+which walks on `DephyExoBoot_L1` with the exo off for 29–33 s at 1.11–1.13 m/s, strides of 1.11 s (the 6 start points of
+54 tried that walk longest; 167 and 166 strikes):
 
 | check | result |
 |---|---|
-| strikes (shadow) | every stance a strike (182 of 182 right, 178 of 178 left), dated +2.9 to +3.1 ± 1.8–1.9 ms after the contact began; no other strike (the right foot's 13 toe scuffs ignored) |
+| strikes (shadow) | every stance a strike (167 of 167 right, 166 of 166 left), dated +2.9 ± 1.8–1.9 ms after the contact began; no other strike (the right foot's 17 toe scuffs ignored) |
 | shadow | the gait is the exo-off gait, bit for bit |
-| what it would do (shadow) | stance from phase 0.15 (reel-in after the foot lands) for 0.50–0.52 ± 0.02 s, ending at phase 0.60–0.62 ± 0.01 of the true stride; none ran through swing (0 of 330); raw muscle peak 38–42 N·m, command peak 23 N·m, 5.4–5.5 N·m·s per stride |
+| what it would do (shadow) | stance from phase 0.15 (reel-in after the foot lands) for 0.50–0.52 ± 0.02 s, ending at phase 0.60–0.62 ± 0.01 of the true stride; none ran through swing (0 of 303); raw muscle peak 38–42 N·m, command peak 23 N·m, 5.4 N·m·s per stride |
 | applied torque | equals the command (to 2×10⁻¹⁵ N·m), changing only on the 150 Hz ticks |
-| assisting | stance 0.45–0.52 ± 0.05 s, ending at phase 0.59–0.66 ± 0.04–0.06; none ran through swing (0 of 61); raw peak 32–34 N·m, command peak 18–21 N·m |
+| assisting | stance 0.47–0.51 ± 0.03–0.04 s, ending at phase 0.60–0.65 ± 0.04–0.07; none ran through swing (0 of 52); raw peak 33–34 N·m, command peak 17–20 N·m |
 
 **The command's shape is not the boot's,** and that is the policy's gait, not the port. Per stride (the boot's two
 sessions against the sim's shadow runs), stance starts at the same phase (0.13–0.15 on the boot, 0.15 here), and the
@@ -208,21 +208,21 @@ scaling normalizes to `peak_torque`, and the contractile element sits longer (0.
 the toe-off and the shape follow this gait, not the participant's.
 
 **Gait survival (reported, not required).** With the VNMC's torque, which the policy was never trained with, it drifts
-off the reference motion (the imitation env's 0.6 rad termination) after 5.5–11.9 s from all 6 start points (one
-fall), at 1.09–1.15 m/s with strides shortening to 0.99–1.08 s; 4PTS lasted 5–14 s on the same policy. Most of those endings
-are the imitation env's drift stop, not falls, and the torque is what the policy cannot take. From the same 6 start
-points, with the policy unchanged:
+off the reference motion (the imitation env's 0.6 rad termination) after 5.5–11.9 s from all 6 start points, at
+1.09–1.22 m/s with strides shortening to 1.01–1.09 s; 4PTS lasted 4.6–10 s on the same policy. These endings are the
+imitation env's drift stop, not falls, and the torque is what the policy cannot take. From 6 start points (280, 320,
+360, 480, 1240 and 1280), with the policy unchanged:
 
 | `peak_torque` | with the drift stop | without it (a fall or the 33.3 s limit ends it) |
 |---|---|---|
-| 0 (exo off) | 32.3–33.3 s | 33.3 s, all 6 |
+| 0 (exo off) | 10.3–33.3 s | 33.3 s, all 6 |
 | 10 N·m | 8.4–20.5 s, all off the reference | 33.3 s, all 6 |
-| 15 N·m | 8.3–20.5 s, all off the reference | 33.3 s at 5 of 6; one fall at 14.5 s |
+| 15 N·m | 8.3–20.5 s, all off the reference | 33.3 s, all 6 |
 | 25 N·m | 5.5–11.9 s (one fall) | 5.6–12.3 s, all falls |
 
-So for evaluating the VNMC on a policy trained without it, 10 N·m with the drift stop off
+So for evaluating the VNMC on a policy trained without it, 10 or 15 N·m with the drift stop off
 (`env._out_of_trajectory_threshold = inf`, as `tools/render_controller_video.py` sets it) keeps it walking the whole
-episode at 1.10–1.11 m/s, and 15 N·m nearly always does. A policy trained with the VNMC should take 25 N·m, but that has not been tested.
+episode at 1.08–1.11 m/s. A policy trained with the VNMC should take 25 N·m, but that has not been tested.
 
 To see it, `tools/render_controller_video.py --case VNMC` renders an episode with, per leg, the VNMC's muscle: its
 stimulation, force and length, and its raw torque against this stance's peak, the 80% the toe-off must fall below,
