@@ -110,6 +110,19 @@ python tools/replay_dl_session.py "<session dir>/<date>_<time>_<subject>_<trial>
 The boot also re-sends samples on loop iterations it does not log; the replay restores them, which is what makes the
 replies match after each gap in the log. The logged replies are one tick stale, a second tick on 0.02–0.3% of rows.
 
+**Across the whole study.** The same replay on every DL session of the study's 11 participants: 21 sessions with
+treadmill speed changes and 22 familiarization runs at a steady 1.25 m/s in which participants varied their gait. That
+is 86 legs and about 5.8 million rows, all with these parameters.
+
+- **Events:** every logged heel strike and toe-off is an is_stance edge on its own row, on every leg (≥ 99.7%).
+- **Spline:** equals the boot's command exactly on every leg.
+- **Torque:** impulse within −0.7% to +1.3%.
+- **State machine:** agrees on 98% of rows on the median leg. It is lower (91–95%) only where a boot failed or the Jetson
+  stopped replying (below), since the boot ended reel-in and reel-out on slack.
+- **Network:** matches the Jetson's replies within 1×10⁻³ on 98% of rows on the median leg (87–99.7%), and is_stance
+  agrees on 99.99%. The misses come in episodes of a few seconds to about 30 s (see the known limits). In the sessions
+  examined 10 s at a time, the network matches as on the validation sessions outside those episodes (99.4–99.9%).
+
 `tools/calibrate_boot_sensors.py` fits the sensors to the same logs: the standing ankle angles and the IMU mounts in the
 configs come from it (the two sessions agree within 1.2°), and it measures what each remaining sim-vs-boot difference
 does to the network, fed the real logs with that one difference.
@@ -252,6 +265,15 @@ python tools/render_controller_video.py <train_session_...>/trained_models/<mode
   channels.
 * **Reel-in and reel-out last fixed times.** The boot ends them on cable slack; there is no cable here. The durations
   are the validation sessions' means.
+* **The sim's link to the network is perfect; the boot's was not.**
+  * On the boot, the Pi and the Jetson talk over a network link, and in most DL sessions of the study it had episodes
+    lasting a few seconds to about 30 s:
+    * in the worst, the Jetson's replies stopped arriving, and the boot kept acting on the last one, for up to 1.7 s;
+    * in others the replies were not the network's on the logged inputs. The Jetson's server drops any message that
+      does not parse as a whole sample, so its input window can differ from what the Pi sent and logged.
+  * Some episodes follow a stall in the boot's logging; others come with no gap at all.
+  * In the sim the reply always arrives, one tick late, from exactly the samples sent. So the port reproduces the boot
+    as it behaved outside those episodes, not inside them.
 * **The simulated exo is an ideal torque source**, as for 4PTS.
 * **The reference gait is not the validation sessions' gait.** Its ankle moves through 37–42° against the boot's 30–31°
   and reads 4–9° lower; fed the boot's logs with differences of that size, the network barely cares (RMSE <= 0.015 for
