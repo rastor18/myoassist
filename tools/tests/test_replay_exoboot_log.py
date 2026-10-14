@@ -8,6 +8,7 @@ would report a port as faithful or broken for the wrong reason.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 
 import numpy as np
@@ -170,6 +171,42 @@ def test_recovers_an_exact_port(log_prefix):
     # Stale commands outside stance must not count: the assist command is zero there.
     assert np.all(boot[window & (log.state != 4)] == 0.0)
     assert np.sqrt(np.mean((port - boot)[window] ** 2)) < 0.5
+
+
+def test_spline_layer_reads_a_logged_nan_phase_as_no_phase(log_prefix):
+    """The boot logs a spline row without a phase as NaN and commands nothing there; the layer must compare that with
+    the spline's no-phase torque (0), not with the spline at phase 0 (its bias)."""
+    from tools.replay_exoboot_log import Log, check_spline, params_in_window
+
+    params = params_in_window(pd.read_csv(log_prefix + "CONFIG.csv"), 10.0, 55.0)
+    log = Log.read(log_prefix + "LEFT.csv")
+    window = (log.t >= 10.0) & (log.t <= 55.0)
+    row = np.flatnonzero(window & (log.controller == 8))[0]
+    phase, commanded = log.phase.copy(), log.commanded.copy()
+    phase[row], commanded[row] = np.nan, 0.0
+    log = dataclasses.replace(log, phase=phase, commanded=commanded)
+    assert np.abs(check_spline(log, params, window)).max() < 1e-12
+
+
+def test_stride_stats_leave_a_torqueless_stride_out_of_the_lag():
+    from tools.replay_exoboot_log import Log, stride_stats
+
+    t = np.arange(0.0, 4.0, 1 / RATE)
+    strikes = np.abs((t % 1.0)) < 1 / RATE
+    log = Log(
+        t=t,
+        heel_strike=strikes,
+        phase=np.zeros_like(t),
+        commanded=np.zeros_like(t),
+        measured=np.zeros_like(t),
+        controller=np.zeros_like(t),
+        state=np.zeros_like(t),
+    )
+    reference = np.where((t % 1.0) < 0.5, 10.0, 0.0)
+    torque = np.where(((t % 1.0) < 0.5) & (t >= 1.0), 10.0, 0.0)  # nothing in the first stride
+    lag, peak, impulse = stride_stats(log, reference, t, torque, 0.0, 4.0)
+    assert np.all(np.isfinite(lag)) and len(lag) == len(peak) - 1
+    assert peak[0] == -1.0 and impulse[0] == -1.0
 
 
 def test_refuses_a_window_with_a_parameter_change(log_prefix):
