@@ -280,7 +280,8 @@ def report_side(name: str, log: DlLog, params, weights, start: float, end: float
 
     spline = FourPointSpline(**params.spline)
     rows = window & (log.controller == FOUR_POINT_SPLINE_CONTROLLER)
-    err = np.array([spline.torque(p) for p in log.gait_phase[rows]]) - log.commanded[rows]
+    # A NaN logged phase is "no phase" (None: no torque, as on the boot), not phase 0, which would read as the bias.
+    err = np.array([spline.torque(None if np.isnan(p) else p) for p in log.gait_phase[rows]]) - log.commanded[rows]
     print(f"3. spline     max |port - commanded_torque| = {np.abs(err).max():.1e} N*m over {rows.sum()} spline rows")
 
     if swing_only is None:

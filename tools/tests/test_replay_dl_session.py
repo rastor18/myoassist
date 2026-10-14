@@ -171,6 +171,25 @@ def test_runs_end_to_end(session, capsys):
     assert len(impulse) == 2 and max(abs(pct) for pct in impulse) <= 2.0
 
 
+def test_spline_layer_reads_a_logged_nan_phase_as_no_phase(session, tmp_path, capsys):
+    """A spline row the boot logged without a gait phase (empty, read as NaN), where it commanded nothing: the spline
+    layer must compare it with no torque, not with the spline at phase 0 (its 3 N*m bias)."""
+    from tools.replay_dl_session import main
+
+    prefix = str(tmp_path / "20990101_0000_TEST_")
+    for side in ("LEFT", "RIGHT"):
+        with open(session[0] + f"{side}.csv", newline="") as f:
+            rows = list(csv.reader(f))
+        controller, phase, command = (NAMED.index(c) for c in ("controller", "gait_phase", "commanded_torque"))
+        row = next(r for r in rows[1:] if r[controller] == str(FOUR_POINT_SPLINE_CONTROLLER))
+        row[phase], row[command] = "", "0.0"
+        with open(prefix + f"{side}.csv", "w", newline="") as f:
+            csv.writer(f).writerows(rows)
+    pd.read_csv(session[0] + "CONFIG.csv").to_csv(prefix + "CONFIG.csv", index=False)
+    main([prefix, "--start", "0", "--end", "100"])
+    assert capsys.readouterr().out.count("max |port - commanded_torque| = 0.0e+00") == 2
+
+
 def test_layer_2_is_skipped_without_weights(session, capsys):
     from tools.replay_dl_session import main
 
