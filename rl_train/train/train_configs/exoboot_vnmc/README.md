@@ -157,6 +157,26 @@ On one participant's two VNMC sessions, over the walking at constant parameters 
   The raw peak is 0.5–2.6% higher. The same replay at 175 Hz in the loop (the tick grid alone) lags +1.5 to +2.1 ms,
   impulse within 0.4%.
 
+**Across the whole study.** The same replay on every VNMC session of the study's 11 participants: 21 sessions with
+treadmill speed changes and 22 familiarization runs at a steady 1.25 m/s in which participants varied their gait. That
+is 86 legs and about 29,500 strides, all with these parameters:
+
+- **Toe-off:** the port's eight-tick toe-off fires on the boot's last stance row in 100% of stances on the median leg,
+  ≥ 99.65% on 95% of legs, and ≥ 98.3% on every leg. So eight falling ticks is how the boot ran throughout, not one
+  session's quirk.
+- **Muscle:** bit for bit on 98.1–99.9% of rows (median 99.85%). Every row that is not sits just after a logging gap,
+  where the unlogged iterations are fitted; the per-stance scaling then carries the difference into the next stance's
+  command. In runs whose boot dropped many rows (one had 633 gaps in its window), that reaches a few N·m on a few
+  rows.
+- **Whole leg** (the boot's own reel-in ends): control state agrees on 98.8–99.9% of rows; stance ends on the boot's
+  row in 100% of strides on the median leg (97.2–100%).
+- **Impulse** with a fixed reel-in: −2.5% to +2.8% of the boot's command (median −0.2%); reel-in is where the boot
+  varied most.
+- **150 Hz in-loop:** median per-stride impulse within 2% of the boot-rate replay, lag −1.3 to +8.7 ms (median 3.2).
+
+Some sessions had no quiet standing at the start of the log. There the standing angle can't be measured from the log,
+but the replay layers read the logged angle and don't need it.
+
 Re-run the replay for each boot pair or session before relying on `reel_in_time` or the standing angles; it prints
 both (`exo_controller_params: ...`).
 
