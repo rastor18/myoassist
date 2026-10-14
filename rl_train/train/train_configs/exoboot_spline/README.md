@@ -160,6 +160,19 @@ window (245–485 s, 206 strides per leg):
 | 150 Hz in-loop | the device env's tick schedule, with the logged strikes | lag +3.4 to +4.7 ms ± 2.3–2.7 ms; peak and impulse within 0.2% |
 | | the same, with the gyro port reading `gyro_z` at each tick | lag +5.5 to +7.0 ms ± 3.1–3.5 ms; peak and impulse within 0.2% |
 
+**Across the whole study.** The same replay on every four-point-spline session of the study's 11 participants (23
+sessions with treadmill speed changes and 22 familiarization runs at a steady 1.25 m/s in which participants varied
+their gait; 90 legs, about 31,000 strides; each window from just after the start-up torque ramp to the end of
+assistance), all with the validation log's parameters:
+
+- the spline equals the boot's command exactly on every leg;
+- the estimator's validity agrees on 100% of rows;
+- stance ends on the boot's own row in 99.4–100% of strides;
+- the whole controller's impulse is within −0.3% to +0.7% of the boot's command;
+- the gyro port puts 98–100% of strikes on the boot's own row;
+- at 150 Hz the lag is +2.6 to +4.7 ms with the logged strikes and +4.7 to +6.9 ms with the gyro port, with impulse
+  within 0.4%.
+
 The replay uses the log's own parameters, including the boot's 3 N·m bias. The phase differences beyond 1×10⁻³ (a
 handful of rows) are the boot's own logging: its loop occasionally stalls between stamping `loop_time` and running the
 estimator, so those rows log a phase from a later instant. Each of the four late gyro strikes follows such a gap, 8–31

@@ -161,7 +161,9 @@ def strides(strikes: np.ndarray, start: float, end: float):
 def check_spline(log: Log, params: SessionParams, window: np.ndarray) -> np.ndarray:
     rows = window & (log.controller == FOUR_POINT_SPLINE_CONTROLLER)
     spline = FourPointSpline(**params.spline)
-    return np.array([spline.torque(p) for p in log.phase[rows]]) - log.commanded[rows]
+    # The log writes "no phase" as NaN, which the spline must see as None (no torque, as on the boot): a NaN would clamp
+    # to phase 0 and read as the bias.
+    return np.array([spline.torque(None if np.isnan(p) else p) for p in log.phase[rows]]) - log.commanded[rows]
 
 
 def replay_phase(log: Log, params: SessionParams) -> np.ndarray:
@@ -234,7 +236,8 @@ def stride_stats(
         r, g, tf = ref[m], got[m], fine[m]
         if r.sum() <= 0:
             continue
-        lag.append((np.sum(g * tf) / g.sum() - np.sum(r * tf) / r.sum()) * 1e3)
+        if g.sum() > 0:  # a stride the replay gave no torque has no centroid; its peak and impulse still count (-100%)
+            lag.append((np.sum(g * tf) / g.sum() - np.sum(r * tf) / r.sum()) * 1e3)
         peak.append(g.max() / r.max() - 1)
         impulse.append(g.sum() / r.sum() - 1)
     return np.array(lag), np.array(peak), np.array(impulse)
